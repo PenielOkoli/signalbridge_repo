@@ -46,6 +46,7 @@ export default function DashboardPage() {
   const [connection, setConnection] = useState<BridgeConnection>({ apiUrl: defaultApiUrl, token: "" });
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [exchangeState, setExchangeState] = useState<ExchangeStateResponse | null>(null);
+  const [exchangeError, setExchangeError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>(fallbackLogs);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState<"start" | "stop" | "refresh" | null>(null);
@@ -70,14 +71,21 @@ export default function DashboardPage() {
 
         try {
           const exchangeResponse = await fetchBridgeJson<ExchangeStateResponse>(connection, "/exchange/state");
-          if (!cancelled) setExchangeState(exchangeResponse);
-        } catch {
-          if (!cancelled) setExchangeState(null);
+          if (!cancelled) {
+            setExchangeState(exchangeResponse);
+            setExchangeError(null);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setExchangeState(null);
+            setExchangeError(error instanceof Error ? error.message : "Exchange data is unavailable.");
+          }
         }
       } catch (error) {
         if (cancelled) return;
         setStatus(null);
         setExchangeState(null);
+        setExchangeError(null);
         setLogs(fallbackLogs);
         setErrorMessage(error instanceof Error ? error.message : "Unable to reach SignalBridge.");
       }
@@ -101,6 +109,15 @@ export default function DashboardPage() {
       setStatus(statusResponse);
       setLogs(logResponse.logs.length ? logResponse.logs : fallbackLogs);
       setErrorMessage(statusResponse.bot.last_error);
+
+      try {
+        const exchangeResponse = await fetchBridgeJson<ExchangeStateResponse>(connection, "/exchange/state");
+        setExchangeState(exchangeResponse);
+        setExchangeError(null);
+      } catch (error) {
+        setExchangeState(null);
+        setExchangeError(error instanceof Error ? error.message : "Exchange data is unavailable.");
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Refresh failed.");
     } finally {
@@ -255,6 +272,7 @@ export default function DashboardPage() {
 
               <div className="simple-panel">
                 <PanelTitle icon={<KeyRound className="h-5 w-5" />} title="Exchange account" right={exchangeState ? "Connected" : "Not loaded"} />
+                {exchangeError ? <p className="border-b border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">Exchange data unavailable: {exchangeError}</p> : null}
                 <div className="grid gap-px bg-white/10">
                   <SimpleRow label="Open positions" value={String(exchangeState?.total_open_positions ?? 0)} />
                   <SimpleRow label="Open orders" value={String(exchangeState?.total_open_orders ?? 0)} />
