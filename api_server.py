@@ -1,0 +1,483 @@
+"""
+SignalBridge local API bridge.
+
+The FastAPI app exposes redacted configuration, runtime status, logs, bot
+control, and Telegram phone-auth endpoints. Sensitive values remain encrypted
+on the VM filesystem and are never returned to the dashboard.
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from typing import Any, Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from auth_manager import (
+    AUTH_COOKIE_NAME,
+    AuthError,
+    AuthManager,
+    InvalidCredentialsError,
+    SessionClaims,
+    SessionValidationError,
+    SignupDisabledError,
+)
+from bot_runtime import BotSupervisor, RuntimeConfigurationError, RuntimeSupervisorError, TelegramAuthError
+from bridge_logging import LogStore
+from config_manager import AppConfig, ConfigManager, ConfigManagerError, ConfigValidationError
+from production_security import (
+    InMemoryRateLimiter,
+    RateLimit,
+    apply_security_headers,
+    cors_origins_from_env,
+    trusted_hosts_from_env,
+    validate_production_environment,
+)
+
+
+class ApiServerError(RuntimeError):
+    """Base API bridge error."""
+
+
+class TelegramConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    phone_number: str = ""
+    monitored_chats: list[str] = Field(default_factory=list)
+
+
+ExchangeIdPayload = Literal[
+    "bybit",
+    "bingx",
+    "binanceusdm",
+    "okx",
+    "bitget",
+    "kucoinfutures",
+    "mexc",
+    "gateio",
+    "phemex",
+    "coinex",
+]
+
+
+class ExchangeConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    exchange_id: ExchangeIdPayload = "bybit"
+    mode: Literal["testnet", "mainnet"] = "testnet"
+    default_leverage: int = Field(default=3, ge=1, le=125)
+    api_key: str | None = Field(default=None, repr=False)
+    api_secret: str | None = Field(default=None, repr=False)
+    api_password: str | None = Field(default=None, repr=False)
+
+
+class OpenAIConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    provider: Literal["openai", "groq"] = "openai"
+    model: str = "gpt-4o-mini"
+    request_timeout_seconds: int = Field(default=20, ge=1, le=120)
+    api_key: str | None = Field(default=None, repr=False)
+
+
+class RiskConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    risk_mode: Literal["fixed_usdt", "balance_percent"] = "fixed_usdt"
+    fixed_usdt_risk: float = Field(default=25.0, gt=0)
+    balance_risk_percent: float = Field(default=1.0, gt=0, le=100)
+    max_leverage: int = Field(default=10, ge=1, le=125)
+    daily_trade_limit: int | None = Field(default=None, ge=1)
+    max_take_profit_orders: int = Field(default=1, ge=1, le=10)
+    enabled_symbols: list[str] = Field(default_factory=list)
+
+
+class SecurityConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    api_bearer_token: str | None = Field(default=None, min_length=32, repr=False)
+
+
+class ConfigUpdatePayload(BaseModel):
+    """Dashboard update payload.
+
+    Secret fields use null to keep the existing encrypted value, an empty string
+    to clear it, or a non-empty plaintext value to replace it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    security: SecurityConfigPayload = Field(default_factory=SecurityConfigPayload)
+    telegram: TelegramConfigPayload = Field(default_factory=TelegramConfigPayload)
+    exchange: ExchangeConfigPayload = Field(default_factory=ExchangeConfigPayload)
+    openai: OpenAIConfigPayload = Field(default_factory=OpenAIConfigPayload)
+    risk: RiskConfigPayload = Field(default_factory=RiskConfigPayload)
+
+
+class TelegramVerifyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    code: str = Field(min_length=1)
+    password: str | None = Field(default=None, repr=False)
+
+
+class AuthSignupPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=512, repr=False)
+
+
+class AuthLoginPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=512, repr=False)
+
+
+def create_app(
+    config_manager: ConfigManager | None = None,
+    log_store: LogStore | None = None,
+    runtime: BotSupervisor | None = None,
+    cors_origins: list[str] | None = None,
+) -> FastAPI:
+    """Create the secured API app used by uvicorn and tests."""
+
+    manager = config_manager or ConfigManager()
+    logs = log_store or LogStore(max_entries=1_000)
+    supervisor = runtime or BotSupervisor(manager, logs)
+    auth_manager = AuthManager()
+    rate_limiter = InMemoryRateLimiter()
+    bearer = HTTPBearer(auto_error=False)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        validate_production_environment()
+        try:
+            yield
+        finally:
+            await supervisor.shutdown()
+
+    app = FastAPI(title="SignalBridge API", version="1.0.0", lifespan=lifespan)
+    app.state.config_manager = manager
+    app.state.log_store = logs
+    app.state.runtime = supervisor
+    app.state.auth_manager = auth_manager
+
+    trusted_hosts = trusted_hosts_from_env()
+    if trusted_hosts is not None:
+        if not trusted_hosts:
+            raise RuntimeError("TRUSTED_HOSTS must be configured in production")
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or cors_origins_from_env(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        apply_security_headers(request, response.headers)
+        return response
+
+    def require_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
+        expected = _expected_bearer_token(manager)
+        supplied = credentials.credentials if credentials else ""
+        if not expected or supplied != expected:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    def require_session(request: Request) -> SessionClaims:
+        token = request.cookies.get(AUTH_COOKIE_NAME, "")
+        if not token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
+        try:
+            return auth_manager.verify_session(token)
+        except SessionValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    protected = [Depends(require_token), Depends(require_session)]
+
+    def limit_auth_attempts(request: Request) -> None:
+        rate_limiter.check(request, "auth", RateLimit(max_requests=10, window_seconds=60))
+
+    def limit_telegram_code_attempts(request: Request) -> None:
+        rate_limiter.check(request, "telegram-code", RateLimit(max_requests=3, window_seconds=300))
+
+    def limit_telegram_verify_attempts(request: Request) -> None:
+        rate_limiter.check(request, "telegram-verify", RateLimit(max_requests=5, window_seconds=300))
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"status": "ok", "runtime": await supervisor.get_status()}
+
+    @app.get("/auth/state", dependencies=[Depends(require_token)])
+    async def auth_state() -> dict[str, Any]:
+        return {
+            "signup_enabled": auth_manager.signup_enabled(),
+            "workspace_mode": "single_tenant",
+        }
+
+    @app.post("/auth/signup", dependencies=[Depends(require_token), Depends(limit_auth_attempts)])
+    async def signup(payload: AuthSignupPayload, response: Response) -> dict[str, Any]:
+        try:
+            user = auth_manager.create_user(payload.email, payload.password, payload.name)
+            session_token = auth_manager.issue_session(user)
+        except SignupDisabledError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except (AuthError, ValueError, ValidationError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+        _set_session_cookie(response, session_token)
+        logs.append("info", "dashboard user created", email=user.email)
+        return {"user": auth_manager.public_user(user), "signup_enabled": auth_manager.signup_enabled()}
+
+    @app.post("/auth/login", dependencies=[Depends(require_token), Depends(limit_auth_attempts)])
+    async def login(payload: AuthLoginPayload, response: Response) -> dict[str, Any]:
+        try:
+            user = auth_manager.authenticate(payload.email, payload.password)
+            session_token = auth_manager.issue_session(user)
+        except InvalidCredentialsError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        except AuthError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+        _set_session_cookie(response, session_token)
+        logs.append("info", "dashboard user logged in", email=user.email)
+        return {"user": auth_manager.public_user(user), "signup_enabled": auth_manager.signup_enabled()}
+
+    @app.get("/auth/me", dependencies=[Depends(require_token)])
+    async def me(claims: SessionClaims = Depends(require_session)) -> dict[str, Any]:
+        return {"user": auth_manager.public_user(claims), "signup_enabled": auth_manager.signup_enabled()}
+
+    @app.post("/auth/logout", dependencies=[Depends(require_token)])
+    async def logout(response: Response) -> dict[str, Any]:
+        _clear_session_cookie(response)
+        return {"ok": True}
+
+    @app.get("/status", dependencies=protected)
+    async def get_status() -> dict[str, Any]:
+        return await supervisor.get_status()
+
+    @app.get("/logs", dependencies=protected)
+    async def get_logs(limit: int = 200) -> dict[str, Any]:
+        return {"logs": [entry.model_dump(mode="json") for entry in logs.list(limit)]}
+
+    @app.get("/exchange/state", dependencies=protected)
+    async def get_exchange_state() -> dict[str, Any]:
+        try:
+            return await supervisor.get_exchange_snapshot()
+        except RuntimeConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except RuntimeSupervisorError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.get("/config", dependencies=protected)
+    async def get_config() -> dict[str, Any]:
+        config = _load_or_initialize(manager)
+        return _redacted_config_response(manager, config)
+
+    @app.post("/config", dependencies=protected)
+    async def update_config(payload: ConfigUpdatePayload) -> dict[str, Any]:
+        current = _load_or_initialize(manager)
+        try:
+            updated = _merge_config(manager, current, payload)
+            manager.save_config(updated)
+            await supervisor.on_config_updated(current, updated)
+        except (ConfigManagerError, ValidationError, ValueError, RuntimeSupervisorError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+        logs.append("info", "configuration updated")
+        return _redacted_config_response(manager, updated)
+
+    @app.post("/bot/start", dependencies=protected)
+    async def start_bot() -> dict[str, Any]:
+        try:
+            return await supervisor.start_bot()
+        except RuntimeConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except RuntimeSupervisorError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.post("/bot/stop", dependencies=protected)
+    async def stop_bot() -> dict[str, Any]:
+        try:
+            return await supervisor.stop_bot()
+        except RuntimeSupervisorError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.post("/telegram/request-code", dependencies=[Depends(require_token), Depends(require_session), Depends(limit_telegram_code_attempts)])
+    async def request_telegram_code() -> dict[str, Any]:
+        try:
+            return await supervisor.request_telegram_code()
+        except RuntimeConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except TelegramAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.post(
+        "/telegram/verify-code",
+        dependencies=[Depends(require_token), Depends(require_session), Depends(limit_telegram_verify_attempts)],
+    )
+    async def verify_telegram_code(payload: TelegramVerifyPayload) -> dict[str, Any]:
+        try:
+            return await supervisor.verify_telegram_code(payload.code, payload.password)
+        except TelegramAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.get("/telegram/chats", dependencies=protected)
+    async def list_telegram_chats() -> dict[str, Any]:
+        try:
+            return await supervisor.list_available_telegram_chats()
+        except RuntimeConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except TelegramAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.post("/telegram/logout", dependencies=protected)
+    async def logout_telegram() -> dict[str, Any]:
+        try:
+            return await supervisor.logout_telegram()
+        except RuntimeSupervisorError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return app
+
+
+def _load_or_initialize(manager: ConfigManager) -> AppConfig:
+    if manager.config_exists():
+        return manager.load_config()
+    config = manager.initialize_empty_config()
+    manager.save_config(config)
+    return config
+
+
+def _merge_config(manager: ConfigManager, current: AppConfig, payload: ConfigUpdatePayload) -> AppConfig:
+    data = current.model_dump(mode="json")
+
+    if payload.security.api_bearer_token:
+        if not _env_flag("ALLOW_DASHBOARD_TOKEN_ROTATION"):
+            raise ConfigValidationError("dashboard API token is managed by deployment environment")
+        data["security"]["api_bearer_token"] = payload.security.api_bearer_token
+
+    data["telegram"]["phone_number"] = payload.telegram.phone_number
+    data["telegram"]["monitored_chats"] = payload.telegram.monitored_chats
+    data["exchange"]["exchange_id"] = payload.exchange.exchange_id
+    data["exchange"]["mode"] = payload.exchange.mode
+    data["exchange"]["default_leverage"] = payload.exchange.default_leverage
+    data["openai"]["provider"] = payload.openai.provider
+    data["openai"]["model"] = payload.openai.model
+    data["openai"]["request_timeout_seconds"] = payload.openai.request_timeout_seconds
+    data["risk"] = payload.risk.model_dump(mode="json")
+
+    if payload.exchange.api_key is not None:
+        data["exchange"]["encrypted_api_key"] = manager.encrypt_secret(payload.exchange.api_key)
+    if payload.exchange.api_secret is not None:
+        data["exchange"]["encrypted_api_secret"] = manager.encrypt_secret(payload.exchange.api_secret)
+    if payload.exchange.api_password is not None:
+        data["exchange"]["encrypted_api_password"] = manager.encrypt_secret(payload.exchange.api_password)
+    if payload.openai.api_key is not None:
+        if not _env_flag("ALLOW_DASHBOARD_PARSER_KEY_UPDATE"):
+            raise ConfigValidationError("parser API key is managed by deployment environment")
+        data["openai"]["encrypted_api_key"] = manager.encrypt_secret(payload.openai.api_key)
+
+    try:
+        return AppConfig.model_validate(data)
+    except ValidationError as exc:
+        raise ConfigValidationError(str(exc)) from exc
+
+
+def _redacted_config_response(manager: ConfigManager, config: AppConfig) -> dict[str, Any]:
+    return {
+        "schema_version": config.schema_version,
+        "security": {"api_bearer_token_set": bool(config.security.api_bearer_token)},
+        "telegram": {
+            "app_configured": manager.telegram_app_configured(config),
+            "phone_number": config.telegram.phone_number,
+            "monitored_chats": config.telegram.monitored_chats,
+        },
+        "exchange": {
+            "exchange_id": config.exchange.exchange_id,
+            "mode": config.exchange.mode,
+            "default_leverage": config.exchange.default_leverage,
+            "api_key_set": bool(config.exchange.encrypted_api_key),
+            "api_secret_set": bool(config.exchange.encrypted_api_secret),
+            "api_password_set": bool(config.exchange.encrypted_api_password),
+        },
+        "openai": {
+            "provider": config.openai.provider,
+            "model": config.openai.model,
+            "request_timeout_seconds": config.openai.request_timeout_seconds,
+            "api_key_set": manager.parser_api_key_configured(config),
+        },
+        "risk": config.risk.model_dump(mode="json"),
+    }
+
+
+def _expected_bearer_token(manager: ConfigManager) -> str:
+    env_token = os.getenv("API_BEARER_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    config = _load_or_initialize(manager)
+    return config.security.api_bearer_token
+
+
+def _set_session_cookie(response: Response, session_token: str) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=session_token,
+        max_age=_session_cookie_max_age(),
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=AUTH_COOKIE_NAME,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+
+
+def _session_cookie_max_age() -> int:
+    raw = os.getenv("SIGNALBRIDGE_SESSION_TTL_SECONDS", "").strip()
+    if not raw:
+        return 60 * 60 * 24 * 7
+    try:
+        return max(300, int(raw))
+    except ValueError:
+        return 60 * 60 * 24 * 7
+
+
+def _cookie_secure() -> bool:
+    raw = os.getenv("SIGNALBRIDGE_COOKIE_SECURE", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return os.getenv("ENVIRONMENT", "").strip().lower() in {"prod", "production"}
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+app = create_app()

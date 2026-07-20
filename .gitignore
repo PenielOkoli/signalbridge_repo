@@ -1,0 +1,22 @@
+# Dependencies and build output
+node_modules/
+.next/
+__pycache__/
+*.py[cod]
+
+# Local runtime secrets
+.env
+.env.local
+config.json
+master.key
+users.json
+*.session
+*.session-journal
+
+# Runtime logs
+*.log
+tmp/
+
+# Local editor/system noise
+.DS_Store
+Thumbs.db
