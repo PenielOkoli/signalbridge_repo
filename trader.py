@@ -634,10 +634,18 @@ class CcxtFuturesTrader:
         )
 
     async def _amend_position(self, signal: ParsedSignal) -> ExecutionResult:
+        snapshot = await self.fetch_exchange_snapshot()
         position = await self._get_open_position(signal.symbol)
         position_side = self._position_side(position)
         position_amount = self._position_contracts(position)
         entry_price = self._position_entry_price(position)
+
+        existing_stop_loss, existing_take_profit_targets = self._existing_protective_targets(
+            snapshot,
+            signal.symbol,
+            position_side,
+            entry_price,
+        )
 
         amended_fields: list[str] = []
         stop_order: dict[str, Any] | None = None
@@ -646,8 +654,12 @@ class CcxtFuturesTrader:
         new_stop_loss = signal.stop_loss
         if new_stop_loss is None and signal.move_stop_to_entry:
             new_stop_loss = entry_price
+        if new_stop_loss is None:
+            new_stop_loss = existing_stop_loss
 
         take_profit_targets = self._selected_take_profit_targets(signal)
+        if not take_profit_targets:
+            take_profit_targets = existing_take_profit_targets
         self._validate_amend_protective_plan(
             side=position_side,
             reference_entry_price=entry_price,
@@ -699,6 +711,37 @@ class CcxtFuturesTrader:
             amended_fields=amended_fields,
             message="protective orders amended",
         )
+
+    @staticmethod
+    def _existing_protective_targets(
+        snapshot: ExchangeSnapshot,
+        symbol: str,
+        side: TradeSide | str,
+        entry_price: float,
+    ) -> tuple[float | None, list[float]]:
+        existing_stop_loss: float | None = None
+        existing_take_profit_targets: list[float] = []
+
+        for order in snapshot.open_orders:
+            if order.symbol != symbol or not order.reduce_only or order.trigger_price is None:
+                continue
+
+            trigger_price = float(order.trigger_price)
+            if side == TradeSide.BUY or side == "buy":
+                if trigger_price < entry_price and existing_stop_loss is None:
+                    existing_stop_loss = trigger_price
+                elif trigger_price > entry_price:
+                    existing_take_profit_targets.append(trigger_price)
+            elif side == TradeSide.SELL or side == "sell":
+                if trigger_price > entry_price and existing_stop_loss is None:
+                    existing_stop_loss = trigger_price
+                elif trigger_price < entry_price:
+                    existing_take_profit_targets.append(trigger_price)
+            elif existing_stop_loss is None:
+                existing_stop_loss = trigger_price
+
+        existing_take_profit_targets = sorted({float(target) for target in existing_take_profit_targets})
+        return existing_stop_loss, existing_take_profit_targets
 
     async def _place_reduce_only_trigger_order(
         self,
@@ -1012,36 +1055,42 @@ class CcxtFuturesTrader:
         take_profit_targets: list[float],
         allow_stop_at_entry: bool = False,
     ) -> None:
-        if stop_loss is None:
-            raise RiskCalculationError("amend execution requires a stop loss or move_stop_to_entry=true")
-        if not take_profit_targets:
-            raise RiskCalculationError("amend execution requires at least one take-profit target")
+        if stop_loss is None and not take_profit_targets:
+            raise RiskCalculationError("amend execution requires a stop loss, take-profit target, or move_stop_to_entry=true")
 
-        if side == TradeSide.BUY or side == "buy":
-            stop_is_invalid = stop_loss > reference_entry_price if allow_stop_at_entry else stop_loss >= reference_entry_price
-            if stop_is_invalid:
-                raise RiskCalculationError(
-                    f"long amend requires stop_loss at or below entry when moving to break-even, otherwise below entry (reference entry {reference_entry_price:.4f})"
-                )
-            if any(target <= reference_entry_price for target in take_profit_targets):
-                raise RiskCalculationError(
-                    f"long amend requires all take-profit targets above entry (reference entry {reference_entry_price:.4f})"
-                )
-            return
+        if stop_loss is not None:
+            if side == TradeSide.BUY or side == "buy":
+                stop_is_invalid = stop_loss > reference_entry_price if allow_stop_at_entry else stop_loss >= reference_entry_price
+                if stop_is_invalid:
+                    raise RiskCalculationError(
+                        f"long amend requires stop_loss at or below entry when moving to break-even, otherwise below entry (reference entry {reference_entry_price:.4f})"
+                    )
+            elif side == TradeSide.SELL or side == "sell":
+                stop_is_invalid = stop_loss < reference_entry_price if allow_stop_at_entry else stop_loss <= reference_entry_price
+                if stop_is_invalid:
+                    raise RiskCalculationError(
+                        f"short amend requires stop_loss at or above entry when moving to break-even, otherwise above entry (reference entry {reference_entry_price:.4f})"
+                    )
+            else:
+                raise RiskCalculationError(f"unsupported trade side: {side}")
 
-        if side == TradeSide.SELL or side == "sell":
-            stop_is_invalid = stop_loss < reference_entry_price if allow_stop_at_entry else stop_loss <= reference_entry_price
-            if stop_is_invalid:
-                raise RiskCalculationError(
-                    f"short amend requires stop_loss at or above entry when moving to break-even, otherwise above entry (reference entry {reference_entry_price:.4f})"
-                )
-            if any(target >= reference_entry_price for target in take_profit_targets):
-                raise RiskCalculationError(
-                    f"short amend requires all take-profit targets below entry (reference entry {reference_entry_price:.4f})"
-                )
-            return
+        if take_profit_targets:
+            if side == TradeSide.BUY or side == "buy":
+                if any(target <= reference_entry_price for target in take_profit_targets):
+                    raise RiskCalculationError(
+                        f"long amend requires all take-profit targets above entry (reference entry {reference_entry_price:.4f})"
+                    )
+                return
 
-        raise RiskCalculationError(f"unsupported trade side: {side}")
+            if side == TradeSide.SELL or side == "sell":
+                if any(target >= reference_entry_price for target in take_profit_targets):
+                    raise RiskCalculationError(
+                        f"short amend requires all take-profit targets below entry (reference entry {reference_entry_price:.4f})"
+                    )
+                return
+
+        if side != TradeSide.BUY and side != "buy" and side != TradeSide.SELL and side != "sell":
+            raise RiskCalculationError(f"unsupported trade side: {side}")
 
     @staticmethod
     def _entry_order_type(entry_type: EntryType | str) -> str:
