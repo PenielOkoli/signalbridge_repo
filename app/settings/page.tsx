@@ -68,6 +68,109 @@ const EXCHANGE_OPTIONS: Array<{ label: string; value: ExchangeId }> = [
   { label: "CoinEx", value: "coinex" }
 ];
 
+const EXCHANGE_SETUP_GUIDES: Record<ExchangeId, { title: string; steps: string[]; passphrase: string; safety: string }> = {
+  bybit: {
+    title: "Bybit key setup",
+    steps: [
+      "Open Bybit, then go to API Management.",
+      "Create a new API key for futures/contract trading.",
+      "Allow trading permissions, disable withdrawals, and add an IP whitelist if your account asks for one."
+    ],
+    passphrase: "Bybit keys do not usually need a passphrase.",
+    safety: "Use read + trade permissions only. Never enable withdrawals."
+  },
+  binanceusdm: {
+    title: "Binance USD-M key setup",
+    steps: [
+      "Open Binance, then go to API Management.",
+      "Create an API key and enable futures trading access.",
+      "Do not enable withdrawal permissions."
+    ],
+    passphrase: "Binance USD-M keys do not use a passphrase.",
+    safety: "Use futures trading only and keep withdrawals off."
+  },
+  okx: {
+    title: "OKX key setup",
+    steps: [
+      "Open OKX, then go to API Management.",
+      "Create a trading API key for derivatives or futures.",
+      "Copy the passphrase shown during setup and keep withdrawal access off."
+    ],
+    passphrase: "OKX requires a passphrase.",
+    safety: "Choose trading permission only and save the passphrase immediately."
+  },
+  bitget: {
+    title: "Bitget key setup",
+    steps: [
+      "Open Bitget, then go to API Management.",
+      "Create a futures API key for trading only.",
+      "Save the passphrase if Bitget shows one and keep withdrawals disabled."
+    ],
+    passphrase: "Bitget usually requires a passphrase.",
+    safety: "Trading on, withdrawals off, passphrase saved if shown."
+  },
+  bingx: {
+    title: "BingX key setup",
+    steps: [
+      "Open BingX, then go to API Management.",
+      "Create a futures trading API key.",
+      "Allow trading, block withdrawals, and copy any passphrase BingX provides."
+    ],
+    passphrase: "BingX may require a passphrase depending on the account type.",
+    safety: "If BingX asks for IP restrictions, turn them on."
+  },
+  kucoinfutures: {
+    title: "KuCoin Futures key setup",
+    steps: [
+      "Open KuCoin, then go to API Management.",
+      "Create a futures API key with trading access.",
+      "Keep withdrawal permissions off and save the API passphrase."
+    ],
+    passphrase: "KuCoin Futures requires a passphrase.",
+    safety: "Trading only; passphrase required; never give withdrawal permission."
+  },
+  mexc: {
+    title: "MEXC key setup",
+    steps: [
+      "Open MEXC, then go to API Management.",
+      "Create an API key for futures trading.",
+      "Disable withdrawals and copy any passphrase shown during setup."
+    ],
+    passphrase: "MEXC may require a passphrase.",
+    safety: "Use futures permissions only."
+  },
+  gateio: {
+    title: "Gate.io key setup",
+    steps: [
+      "Open Gate.io, then go to API Management.",
+      "Create an API key and allow futures trading.",
+      "Keep withdrawal permissions off and save the passphrase if Gate.io provides one."
+    ],
+    passphrase: "Gate.io may require a passphrase.",
+    safety: "Gate.io keys should be trade-only and withdrawal disabled."
+  },
+  phemex: {
+    title: "Phemex key setup",
+    steps: [
+      "Open Phemex, then go to API Management.",
+      "Create a futures trading API key.",
+      "Disable withdrawals and keep the passphrase from the key creation screen."
+    ],
+    passphrase: "Phemex requires a passphrase.",
+    safety: "Save the passphrase when you create the key because it is usually shown once."
+  },
+  coinex: {
+    title: "CoinEx key setup",
+    steps: [
+      "Open CoinEx, then go to API Management.",
+      "Create a futures API key for trading only.",
+      "Do not enable withdrawals, and copy the passphrase if CoinEx gives you one."
+    ],
+    passphrase: "CoinEx may require a passphrase.",
+    safety: "Trade-only access is enough for SignalBridge."
+  }
+};
+
 export default function SettingsPage() {
   const defaultApiUrl = process.env.NEXT_PUBLIC_SIGNALBRIDGE_API_URL ?? "";
   // SECURITY: Never expose the bearer token to the frontend.
@@ -277,7 +380,7 @@ export default function SettingsPage() {
             <section className="grid gap-4 lg:grid-cols-4">
               <StepCard number="1" title="Telegram" done={runtime?.telegram.auth_state === "authenticated"} />
               <StepCard number="2" title="Channels" done={config.telegram.monitored_chats.length > 0} />
-              <StepCard number="3" title="Exchange" done={Boolean(config.exchange.api_key_set && config.exchange.api_secret_set)} />
+              <StepCard number="3" title="Exchange key" done={Boolean(config.exchange.api_key_set && config.exchange.api_secret_set)} />
               <StepCard number="4" title="Risk" done={config.risk.fixed_usdt_risk > 0 && config.risk.max_leverage > 0} />
             </section>
 
@@ -338,12 +441,17 @@ export default function SettingsPage() {
 
             <section className="grid gap-4 xl:grid-cols-2">
               <SimplePanel icon={<KeyRound className="h-5 w-5" />} title="3. Connect exchange" right={config.exchange.mode}>
+                <div className="mb-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm leading-6 text-zinc-400">
+                  <p className="font-medium text-zinc-200">Before you paste anything here:</p>
+                  <p className="mt-1">Create the API key inside your exchange account, give it trading access only, and keep withdrawals disabled.</p>
+                </div>
+                <ExchangeSetupGuide exchangeId={config.exchange.exchange_id} />
                 <div className="grid gap-3 md:grid-cols-2">
                   <Select label="Exchange" value={config.exchange.exchange_id} onChange={(value) => setConfig({ ...config, exchange: { ...config.exchange, exchange_id: value as ExchangeId } })} options={EXCHANGE_OPTIONS} />
                   <Select label="Mode" value={config.exchange.mode} onChange={(value) => setConfig({ ...config, exchange: { ...config.exchange, mode: value as "testnet" | "mainnet" } })} options={[{ label: "Testnet", value: "testnet" }, { label: "Mainnet", value: "mainnet" }]} />
-                  <Field label={`API key ${config.exchange.api_key_set ? "(already saved)" : ""}`} value={secrets.exchangeApiKey} onChange={(value) => setSecrets({ ...secrets, exchangeApiKey: value })} />
-                  <Field label={`API secret ${config.exchange.api_secret_set ? "(already saved)" : ""}`} type="password" value={secrets.exchangeApiSecret} onChange={(value) => setSecrets({ ...secrets, exchangeApiSecret: value })} />
-                  <Field label={`Passphrase ${config.exchange.api_password_set ? "(already saved)" : ""}`} type="password" value={secrets.exchangeApiPassword} onChange={(value) => setSecrets({ ...secrets, exchangeApiPassword: value })} placeholder="Only for exchanges that need it" />
+                  <Field label={`Exchange API key ${config.exchange.api_key_set ? "(already saved)" : ""}`} value={secrets.exchangeApiKey} onChange={(value) => setSecrets({ ...secrets, exchangeApiKey: value })} helper="Find this in your exchange’s API management / developer settings." />
+                  <Field label={`Exchange API secret ${config.exchange.api_secret_set ? "(already saved)" : ""}`} type="password" value={secrets.exchangeApiSecret} onChange={(value) => setSecrets({ ...secrets, exchangeApiSecret: value })} helper="This is shown once when you create the API key. Store it securely." />
+                  <Field label={`Passphrase ${config.exchange.api_password_set ? "(already saved)" : ""}`} type="password" value={secrets.exchangeApiPassword} onChange={(value) => setSecrets({ ...secrets, exchangeApiPassword: value })} placeholder="Only needed by some exchanges" helper="Leave blank unless your exchange explicitly gives you a passphrase." />
                   <Field label="Default leverage" value={String(config.exchange.default_leverage)} onChange={(value) => setConfig({ ...config, exchange: { ...config.exchange, default_leverage: Number(value || 0) } })} />
                 </div>
               </SimplePanel>
@@ -441,11 +549,37 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Field({ label, value, onChange, type = "text", placeholder = "" }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string }) {
+function ExchangeSetupGuide({ exchangeId }: { exchangeId: ExchangeId }) {
+  const guide = EXCHANGE_SETUP_GUIDES[exchangeId];
+
+  return (
+    <div className="mb-4 rounded-xl border border-emerald-signal/20 bg-emerald-signal/5 p-4">
+      <div className="text-sm font-semibold text-emerald-200">{guide.title}</div>
+      <div className="mt-1 text-xs uppercase tracking-[0.18em] text-emerald-300/70">Recommended sequence</div>
+      <ol className="mt-2 space-y-2 text-sm leading-6 text-zinc-300">
+        {guide.steps.map((step, index) => (
+          <li key={step} className="flex gap-2">
+            <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-signal/20 text-xs font-semibold text-emerald-100">{index + 1}</span>
+            <span>{step}</span>
+          </li>
+        ))}
+      </ol>
+      <div className="mt-3 rounded-lg border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-xs leading-5 text-emerald-100">
+        {guide.safety}
+      </div>
+      <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs leading-5 text-zinc-400">
+        {guide.passphrase}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, type = "text", placeholder = "", helper = "" }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string; helper?: string }) {
   return (
     <label className="block">
       <span className="mb-1 block text-sm font-medium text-zinc-300">{label}</span>
       <input value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="input-field h-11 text-sm" />
+      {helper ? <span className="mt-1 block text-xs leading-5 text-zinc-500">{helper}</span> : null}
     </label>
   );
 }
