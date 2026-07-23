@@ -897,12 +897,7 @@ class BotSupervisor:
         if action == SignalAction.AMEND or action == "amend":
             if has_position:
                 if not self._has_complete_protective_plan(recovered_signal):
-                    if recovered_signal.move_stop_to_entry:
-                        recovered_signal = self._with_preserved_take_profits(recovered_signal, snapshot)
-                    else:
-                        raise SignalValidationError(
-                            "amend update could not be applied after restart because it does not restate both stop loss and take profit"
-                        )
+                    recovered_signal = self._with_preserved_take_profits(recovered_signal, snapshot)
                 if not self._has_complete_protective_plan(recovered_signal):
                     raise SignalValidationError(
                         "amend update could not be applied after restart because no take-profit orders were found to preserve"

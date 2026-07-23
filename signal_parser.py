@@ -309,6 +309,10 @@ Rules:
     and set is_signal_update=true.
   - For amend messages, include only the fields that are being changed unless
     the message clearly restates the full setup.
+    - If a message clearly updates an existing trade, prefer action="amend" even
+        when it only changes stop loss, take profit, breakeven, or leverage.
+    - If the text says "set BE", "breakeven", "break even", or similar, set
+        move_stop_to_entry=true.
 """.strip()
 
 
@@ -354,6 +358,8 @@ class SignalParser:
             valid_keys = {candidate.key for candidate in context.candidate_signals}
             if extraction.reference_signal_key not in valid_keys:
                 extraction.reference_signal_key = None
+
+        extraction = self._normalize_update_extraction(extraction, clean_message, context)
 
         try:
             return ParsedSignal(
@@ -510,6 +516,79 @@ class SignalParser:
             )
         except ValidationError:
             return None
+
+    @staticmethod
+    def _normalize_update_extraction(
+        extraction: SignalExtraction,
+        message: str,
+        context: SignalContext | None,
+    ) -> SignalExtraction:
+        """Coerce obvious trade-management text into amend-style extraction."""
+
+        lowered = message.lower()
+        compact = re.sub(r"[^a-z0-9%/+# ]+", " ", lowered)
+
+        entry_hints = (
+            "buy now",
+            "sell now",
+            "long now",
+            "short now",
+            "enter now",
+            "entry now",
+            "open now",
+            "activate",
+            "execute now",
+            "market",
+            "cmp",
+            "current price",
+            "current market",
+            "at market",
+        )
+        update_hints = (
+            "set sl",
+            "set stop",
+            "move sl",
+            "move stop",
+            "move stop to entry",
+            "move sl to entry",
+            "set tp",
+            "take profit to",
+            "target to",
+            "tp to",
+            "breakeven",
+            "break even",
+            "break-even",
+            "set be",
+            "trail stop",
+            "update stop",
+            "update tp",
+            "modify stop",
+            "modify tp",
+            "amend",
+            "adjust stop",
+            "adjust tp",
+        )
+
+        looks_like_entry = any(hint in compact for hint in entry_hints)
+        looks_like_update = extraction.is_signal_update or extraction.action in {SignalAction.AMEND, SignalAction.CLOSE, SignalAction.CANCEL}
+        looks_like_update = looks_like_update or any(hint in compact for hint in update_hints)
+        has_reference = bool(extraction.reference_signal_key or (context is not None and (context.reply_signal_key or context.same_message_signal_key)))
+
+        if extraction.action == SignalAction.OPEN and looks_like_update and not looks_like_entry:
+            payload = extraction.model_dump(mode="python")
+            payload["action"] = SignalAction.AMEND
+            payload["is_signal_update"] = True
+            extraction = SignalExtraction.model_validate(payload)
+
+        if extraction.action == SignalAction.AMEND or extraction.action == "amend":
+            payload = extraction.model_dump(mode="python")
+            if payload.get("move_stop_to_entry") is not True and re.search(r"\b(be|set be|breakeven|break even|break-even)\b", lowered):
+                payload["move_stop_to_entry"] = True
+            if not payload.get("reference_signal_key") and has_reference and context is not None:
+                payload["reference_signal_key"] = context.reply_signal_key or context.same_message_signal_key
+            extraction = SignalExtraction.model_validate(payload)
+
+        return extraction
 
     async def _resolve_reference_signal_for_shortcut(self, context: SignalContext) -> ParsedSignal | None:
         for preferred_key in (context.same_message_signal_key, context.reply_signal_key):
