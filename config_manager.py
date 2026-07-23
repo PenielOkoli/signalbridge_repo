@@ -394,17 +394,29 @@ class ConfigManager:
         )
 
     def resolve_parser_api_key(self, config: AppConfig) -> str:
-        """Return the deployment-owned parser key, falling back to legacy config."""
+        """Return the deployment-owned parser key.
+
+        In production, the parser key must come from environment variables.
+        Legacy config.json fallback remains available for local development only.
+        """
 
         env_key = self._parser_api_key_from_env(config.openai)
         if env_key:
             return env_key
+        if self._is_production_env():
+            raise ConfigValidationError(
+                "parser API key must be provided through environment variables in production"
+            )
         return self.decrypt_secret(config.openai.encrypted_api_key)
 
     def parser_api_key_configured(self, config: AppConfig) -> bool:
         """Return True when a parser key is available without exposing it."""
 
-        return bool(self._parser_api_key_from_env(config.openai) or config.openai.encrypted_api_key)
+        if self._parser_api_key_from_env(config.openai):
+            return True
+        if self._is_production_env():
+            return False
+        return bool(config.openai.encrypted_api_key)
 
     def resolve_telegram_api_id(self, config: AppConfig) -> int | None:
         """Return the deployment-owned Telegram API ID, falling back to config."""
@@ -512,6 +524,10 @@ class ConfigManager:
             if value:
                 return value
         return ""
+
+    @staticmethod
+    def _is_production_env() -> bool:
+        return os.getenv("ENVIRONMENT", "").strip().lower() in {"prod", "production"}
 
     @staticmethod
     def _ensure_secret_fields_are_encrypted(config: AppConfig) -> None:

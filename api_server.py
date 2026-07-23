@@ -431,8 +431,7 @@ def _expected_bearer_token(manager: ConfigManager) -> str:
     env_token = os.getenv("API_BEARER_TOKEN", "").strip()
     if env_token:
         return env_token
-    config = _load_or_initialize(manager)
-    return config.security.api_bearer_token
+    raise ConfigValidationError("API_BEARER_TOKEN must be provided through the environment")
 
 
 def _set_session_cookie(response: Response, session_token: str) -> None:
