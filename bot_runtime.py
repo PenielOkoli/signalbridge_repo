@@ -897,8 +897,15 @@ class BotSupervisor:
         if action == SignalAction.AMEND or action == "amend":
             if has_position:
                 if not self._has_complete_protective_plan(recovered_signal):
+                    if recovered_signal.move_stop_to_entry:
+                        recovered_signal = self._with_preserved_take_profits(recovered_signal, snapshot)
+                    else:
+                        raise SignalValidationError(
+                            "amend update could not be applied after restart because it does not restate both stop loss and take profit"
+                        )
+                if not self._has_complete_protective_plan(recovered_signal):
                     raise SignalValidationError(
-                        "amend update could not be applied after restart because it does not restate both stop loss and take profit"
+                        "amend update could not be applied after restart because no take-profit orders were found to preserve"
                     )
                 return recovered_signal, "restart_recovery_amend", None, None
             raise SignalValidationError(
@@ -973,6 +980,35 @@ class BotSupervisor:
         has_stop = parsed.stop_loss is not None or parsed.move_stop_to_entry
         has_take_profit = parsed.take_profit is not None or bool(parsed.take_profit_targets)
         return has_stop and has_take_profit
+
+    @staticmethod
+    def _with_preserved_take_profits(parsed: ParsedSignal, snapshot: ExchangeSnapshot) -> ParsedSignal:
+        """Fill in take-profit targets from the live exchange state for breakeven-only updates."""
+
+        position = next((item for item in snapshot.open_positions if item.symbol == parsed.symbol and item.contracts > 0), None)
+        if position is None or position.entry_price is None:
+            return parsed
+
+        entry_price = position.entry_price
+        side = parsed.side
+        if side == SignalAction.CLOSE:
+            return parsed
+
+        if str(side).lower() == "buy":
+            preserved_targets = [order.trigger_price for order in snapshot.open_orders if order.symbol == parsed.symbol and order.reduce_only and order.trigger_price is not None and order.trigger_price > entry_price]
+        elif str(side).lower() == "sell":
+            preserved_targets = [order.trigger_price for order in snapshot.open_orders if order.symbol == parsed.symbol and order.reduce_only and order.trigger_price is not None and order.trigger_price < entry_price]
+        else:
+            preserved_targets = [order.trigger_price for order in snapshot.open_orders if order.symbol == parsed.symbol and order.reduce_only and order.trigger_price is not None]
+
+        preserved_targets = sorted({float(target) for target in preserved_targets})
+        if not preserved_targets:
+            return parsed
+
+        payload = parsed.model_dump(mode="python")
+        payload["take_profit_targets"] = preserved_targets
+        payload["take_profit"] = preserved_targets[0]
+        return ParsedSignal.model_validate(payload)
 
     def _resolve_recovery_symbol(
         self,
