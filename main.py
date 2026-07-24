@@ -13,16 +13,10 @@ import os
 import uvicorn
 
 from api_server import create_app
-from bot_runtime import BotSupervisor
-from bridge_logging import LogStore
-from config_manager import ConfigManager
 
 
 def build_app():
-    manager = ConfigManager()
-    logs = LogStore(max_entries=1_000, file_path="activity.log")
-    runtime = BotSupervisor(manager, logs)
-    return create_app(manager, logs, runtime)
+    return create_app()
 
 
 app = build_app()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
@@ -27,9 +28,12 @@ from auth_manager import (
     SessionValidationError,
     SignupDisabledError,
 )
-from bot_runtime import BotSupervisor, RuntimeConfigurationError, RuntimeSupervisorError, TelegramAuthError
-from bridge_logging import LogStore
+from bot_runtime import RuntimeConfigurationError, RuntimeSupervisorError, TelegramAuthError
+from database import create_all_tables, create_async_engine_from_env, create_session_maker
+from google_oauth import GoogleOAuthError, GoogleOAuthService, STATE_COOKIE_NAME
 from config_manager import AppConfig, ConfigManager, ConfigManagerError, ConfigValidationError
+from workspace_services import WorkspaceServiceRegistry, WorkspaceServices
+from workspace_repository import WorkspaceRepository
 from production_security import (
     InMemoryRateLimiter,
     RateLimit,
@@ -143,32 +147,39 @@ class AuthLoginPayload(BaseModel):
 
 def create_app(
     config_manager: ConfigManager | None = None,
-    log_store: LogStore | None = None,
-    runtime: BotSupervisor | None = None,
+    workspace_registry: WorkspaceServiceRegistry | None = None,
     cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Create the secured API app used by uvicorn and tests."""
 
     manager = config_manager or ConfigManager()
-    logs = log_store or LogStore(max_entries=1_000)
-    supervisor = runtime or BotSupervisor(manager, logs)
     auth_manager = AuthManager()
     rate_limiter = InMemoryRateLimiter()
     bearer = HTTPBearer(auto_error=False)
+    registry = workspace_registry or WorkspaceServiceRegistry()
+    google_oauth = GoogleOAuthService()
+    workspace_repository = _workspace_repository_from_env()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         validate_production_environment()
+        if workspace_repository is not None and _env_flag("SIGNALBRIDGE_BOOTSTRAP_DATABASE"):
+            engine = create_async_engine_from_env()
+            try:
+                await create_all_tables(engine)
+            finally:
+                await engine.dispose()
         try:
             yield
         finally:
-            await supervisor.shutdown()
+            await registry.shutdown_all()
 
     app = FastAPI(title="SignalBridge API", version="1.0.0", lifespan=lifespan)
     app.state.config_manager = manager
-    app.state.log_store = logs
-    app.state.runtime = supervisor
     app.state.auth_manager = auth_manager
+    app.state.workspace_registry = registry
+    app.state.google_oauth = google_oauth
+    app.state.workspace_repository = workspace_repository
 
     trusted_hosts = trusted_hosts_from_env()
     if trusted_hosts is not None:
@@ -209,6 +220,13 @@ def create_app(
         except SessionValidationError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
+    async def require_workspace_context(claims: SessionClaims = Depends(require_session)) -> tuple[SessionClaims, WorkspaceServices]:
+        workspace_id = claims.workspace_id or auth_manager.workspace_id_for_user(claims.sub)
+        if not workspace_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="workspace membership is required")
+        services = await registry.get(workspace_id)
+        return claims, services
+
     protected = [Depends(require_token), Depends(require_session)]
 
     def limit_auth_attempts(request: Request) -> None:
@@ -222,41 +240,94 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok", "runtime": await supervisor.get_status()}
+        return {"status": "ok", "workspace_count": registry.workspace_count()}
 
     @app.get("/auth/state", dependencies=[Depends(require_token)])
     async def auth_state() -> dict[str, Any]:
         return {
             "signup_enabled": auth_manager.signup_enabled(),
-            "workspace_mode": "single_tenant",
+            "workspace_mode": "multi_tenant",
+            "google_oauth_enabled": google_oauth.enabled(),
+            "google_oauth_error": google_oauth.oauth_error_message(),
         }
+
+    @app.get("/auth/google/start", dependencies=[Depends(require_token)])
+    async def google_start(next: str = "/dashboard") -> Response:
+        try:
+            authorize_url, state_cookie = google_oauth.build_authorize_url(next)
+        except GoogleOAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+        response = Response(status_code=status.HTTP_302_FOUND)
+        response.headers["Location"] = authorize_url
+        response.set_cookie(
+            key=STATE_COOKIE_NAME,
+            value=state_cookie,
+            max_age=600,
+            httponly=True,
+            secure=_cookie_secure(),
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.get("/auth/google/callback")
+    async def google_callback(code: str, state: str, response: Response, request: Request) -> Response:
+        if not state:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google sign-in state is missing")
+
+        state_cookie = request.cookies.get(STATE_COOKIE_NAME, "")
+        if not state_cookie:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google sign-in state cookie is missing")
+
+        try:
+            state_payload = google_oauth.parse_state_cookie(state_cookie)
+            if state_payload.state != state:
+                raise GoogleOAuthError("Google sign-in state does not match the callback")
+            profile = await google_oauth.exchange_code(code, state_cookie)
+            if workspace_repository is None:
+                raise GoogleOAuthError("Google OAuth requires DATABASE_URL to be configured")
+            principal = await workspace_repository.resolve_google_identity(profile)
+            session_token = auth_manager.issue_session(principal.user, workspace_id=principal.workspace.id)
+        except GoogleOAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+        _set_session_cookie(response, session_token)
+        response.delete_cookie(key=STATE_COOKIE_NAME, path="/")
+        await _bootstrap_workspace(principal.workspace.id, principal.workspace.slug, registry)
+        redirect_to = state_payload.next_path
+        response.status_code = status.HTTP_302_FOUND
+        response.headers["Location"] = redirect_to
+        return response
 
     @app.post("/auth/signup", dependencies=[Depends(require_token), Depends(limit_auth_attempts)])
     async def signup(payload: AuthSignupPayload, response: Response) -> dict[str, Any]:
         try:
             user = auth_manager.create_user(payload.email, payload.password, payload.name)
-            session_token = auth_manager.issue_session(user)
+            session_token = auth_manager.issue_session(user, workspace_id=user.workspace_id)
         except SignupDisabledError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except (AuthError, ValueError, ValidationError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
         _set_session_cookie(response, session_token)
-        logs.append("info", "dashboard user created", email=user.email)
+        workspace_services = await registry.get(user.workspace_id or auth_manager.workspace_id_for_user(user.id) or user.id)
+        workspace_services.log_store.append("info", "workspace user created", email=user.email, workspace_id=user.workspace_id)
         return {"user": auth_manager.public_user(user), "signup_enabled": auth_manager.signup_enabled()}
 
     @app.post("/auth/login", dependencies=[Depends(require_token), Depends(limit_auth_attempts)])
     async def login(payload: AuthLoginPayload, response: Response) -> dict[str, Any]:
         try:
             user = auth_manager.authenticate(payload.email, payload.password)
-            session_token = auth_manager.issue_session(user)
+            session_token = auth_manager.issue_session(user, workspace_id=user.workspace_id)
         except InvalidCredentialsError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
         except AuthError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
         _set_session_cookie(response, session_token)
-        logs.append("info", "dashboard user logged in", email=user.email)
+        workspace_services = await registry.get(user.workspace_id or auth_manager.workspace_id_for_user(user.id) or user.id)
+        workspace_services.log_store.append("info", "workspace user logged in", email=user.email, workspace_id=user.workspace_id)
         return {"user": auth_manager.public_user(user), "signup_enabled": auth_manager.signup_enabled()}
 
     @app.get("/auth/me", dependencies=[Depends(require_token)])
@@ -269,60 +340,68 @@ def create_app(
         return {"ok": True}
 
     @app.get("/status", dependencies=protected)
-    async def get_status() -> dict[str, Any]:
-        return await supervisor.get_status()
+    async def get_status(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
+        return await services.runtime.get_status()
 
     @app.get("/logs", dependencies=protected)
-    async def get_logs(limit: int = 200) -> dict[str, Any]:
-        return {"logs": [entry.model_dump(mode="json") for entry in logs.list(limit)]}
+    async def get_logs(limit: int = 200, workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
+        return {"logs": [entry.model_dump(mode="json") for entry in services.log_store.list(limit)]}
 
     @app.get("/exchange/state", dependencies=protected)
-    async def get_exchange_state() -> dict[str, Any]:
+    async def get_exchange_state(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.get_exchange_snapshot()
+            return await services.runtime.get_exchange_snapshot()
         except RuntimeConfigurationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeSupervisorError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @app.get("/config", dependencies=protected)
-    async def get_config() -> dict[str, Any]:
-        config = _load_or_initialize(manager)
-        return _redacted_config_response(manager, config)
+    async def get_config(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
+        config = _load_or_initialize(services.config_manager)
+        return _redacted_config_response(services.config_manager, config)
 
     @app.post("/config", dependencies=protected)
-    async def update_config(payload: ConfigUpdatePayload) -> dict[str, Any]:
-        current = _load_or_initialize(manager)
+    async def update_config(payload: ConfigUpdatePayload, workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
+        current = _load_or_initialize(services.config_manager)
         try:
-            updated = _merge_config(manager, current, payload)
-            manager.save_config(updated)
-            await supervisor.on_config_updated(current, updated)
+            updated = _merge_config(services.config_manager, current, payload)
+            services.config_manager.save_config(updated)
+            await services.runtime.on_config_updated(current, updated)
         except (ConfigManagerError, ValidationError, ValueError, RuntimeSupervisorError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-        logs.append("info", "configuration updated")
-        return _redacted_config_response(manager, updated)
+        services.log_store.append("info", "configuration updated")
+        return _redacted_config_response(services.config_manager, updated)
 
     @app.post("/bot/start", dependencies=protected)
-    async def start_bot() -> dict[str, Any]:
+    async def start_bot(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.start_bot()
+            return await services.runtime.start_bot()
         except RuntimeConfigurationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeSupervisorError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @app.post("/bot/stop", dependencies=protected)
-    async def stop_bot() -> dict[str, Any]:
+    async def stop_bot(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.stop_bot()
+            return await services.runtime.stop_bot()
         except RuntimeSupervisorError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @app.post("/telegram/request-code", dependencies=[Depends(require_token), Depends(require_session), Depends(limit_telegram_code_attempts)])
-    async def request_telegram_code() -> dict[str, Any]:
+    async def request_telegram_code(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.request_telegram_code()
+            return await services.runtime.request_telegram_code()
         except RuntimeConfigurationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except TelegramAuthError as exc:
@@ -332,29 +411,47 @@ def create_app(
         "/telegram/verify-code",
         dependencies=[Depends(require_token), Depends(require_session), Depends(limit_telegram_verify_attempts)],
     )
-    async def verify_telegram_code(payload: TelegramVerifyPayload) -> dict[str, Any]:
+    async def verify_telegram_code(payload: TelegramVerifyPayload, workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.verify_telegram_code(payload.code, payload.password)
+            return await services.runtime.verify_telegram_code(payload.code, payload.password)
         except TelegramAuthError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @app.get("/telegram/chats", dependencies=protected)
-    async def list_telegram_chats() -> dict[str, Any]:
+    async def list_telegram_chats(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.list_available_telegram_chats()
+            return await services.runtime.list_available_telegram_chats()
         except RuntimeConfigurationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except TelegramAuthError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @app.post("/telegram/logout", dependencies=protected)
-    async def logout_telegram() -> dict[str, Any]:
+    async def logout_telegram(workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
         try:
-            return await supervisor.logout_telegram()
+            return await services.runtime.logout_telegram()
         except RuntimeSupervisorError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     return app
+
+
+def _workspace_repository_from_env() -> WorkspaceRepository | None:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        return None
+    engine = create_async_engine_from_env()
+    session_maker = create_session_maker(engine)
+    return WorkspaceRepository(session_maker)
+
+
+async def _bootstrap_workspace(workspace_id: str, workspace_slug: str, registry: WorkspaceServiceRegistry) -> None:
+    services = await registry.get(workspace_id)
+    if not services.config_manager.config_exists():
+        services.log_store.append("info", "workspace initialized after Google sign-in", workspace_id=workspace_id, workspace_slug=workspace_slug)
 
 
 def _load_or_initialize(manager: ConfigManager) -> AppConfig:

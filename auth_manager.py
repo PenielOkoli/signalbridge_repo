@@ -57,6 +57,7 @@ class AuthUser(AuthModel):
     id: str
     email: str
     name: str
+    workspace_id: str | None = None
     password_hash: str = Field(repr=False)
     created_at: int
 
@@ -81,6 +82,7 @@ class PublicUser(AuthModel):
     id: str
     email: str
     name: str
+    workspace_id: str | None = None
 
 
 class UserStore(AuthModel):
@@ -105,10 +107,18 @@ class AuthManager:
         self.signing_secret = signing_secret or _resolve_signing_secret()
 
     def signup_enabled(self) -> bool:
-        return _env_flag("ALLOW_PUBLIC_SIGNUP") or not self._load_store().users
+        raw = os.getenv("ALLOW_PUBLIC_SIGNUP", "").strip().lower()
+        if not raw:
+            return True
+        return raw in {"1", "true", "yes", "on"}
 
-    def public_user(self, user: AuthUser | SessionClaims) -> dict[str, str]:
-        return {"id": user.sub if isinstance(user, SessionClaims) else user.id, "email": user.email, "name": user.name}
+    def public_user(self, user: AuthUser | SessionClaims) -> dict[str, str | None]:
+        return {
+            "id": user.sub if isinstance(user, SessionClaims) else user.id,
+            "email": user.email,
+            "name": user.name,
+            "workspace_id": user.workspace_id,
+        }
 
     def create_user(self, email: str, password: str, name: str) -> AuthUser:
         if not self.signup_enabled():
@@ -125,6 +135,7 @@ class AuthManager:
             id=uuid4().hex,
             email=clean_email,
             name=name,
+            workspace_id=uuid4().hex,
             password_hash=_hash_password(password),
             created_at=int(time.time()),
         )
@@ -134,19 +145,24 @@ class AuthManager:
 
     def authenticate(self, email: str, password: str) -> AuthUser:
         clean_email = email.strip().lower()
-        for user in self._load_store().users:
+        store = self._load_store()
+        for user in store.users:
             if user.email == clean_email and _verify_password(password, user.password_hash):
+                if not user.workspace_id:
+                    user.workspace_id = uuid4().hex
+                    self._save_store(store)
                 return user
         raise InvalidCredentialsError("invalid email or password")
 
     def issue_session(self, user: AuthUser, ttl_seconds: int | None = None, workspace_id: str | None = None) -> str:
         now = int(time.time())
         ttl = ttl_seconds or _session_ttl_seconds()
+        resolved_workspace_id = workspace_id or getattr(user, "workspace_id", None) or self.workspace_id_for_user(user.id)
         claims = {
             "sub": user.id,
             "email": user.email,
             "name": user.name,
-            "workspace_id": workspace_id,
+            "workspace_id": resolved_workspace_id,
             "iat": now,
             "exp": now + ttl,
         }
@@ -162,9 +178,18 @@ class AuthManager:
         now = int(time.time())
         if claims.exp <= now:
             raise SessionValidationError("session has expired")
-        if not any(user.id == claims.sub and user.email == claims.email for user in self._load_store().users):
-            raise SessionValidationError("session user no longer exists")
+        if not claims.workspace_id:
+            workspace_id = self.workspace_id_for_user(claims.sub)
+            if not workspace_id:
+                raise SessionValidationError("session user is not assigned to a workspace")
+            claims.workspace_id = workspace_id
         return claims
+
+    def workspace_id_for_user(self, user_id: str) -> str | None:
+        for user in self._load_store().users:
+            if user.id == user_id:
+                return user.workspace_id
+        return None
 
     def _load_store(self) -> UserStore:
         if not self.users_path.exists():

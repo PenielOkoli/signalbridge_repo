@@ -225,5 +225,10 @@ def create_session_maker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+async def create_all_tables(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)

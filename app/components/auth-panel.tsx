@@ -14,6 +14,8 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
   const [name, setName] = useState("");
   const [message, setMessage] = useState("");
   const [signupEnabled, setSignupEnabled] = useState(true);
+  const [googleOauthEnabled, setGoogleOauthEnabled] = useState(false);
+  const [googleOauthError, setGoogleOauthError] = useState("");
   const [busy, setBusy] = useState(false);
   const isSignup = mode === "signup";
 
@@ -27,9 +29,11 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
           credentials: "include"
         });
         if (!response.ok) return;
-        const body = (await response.json()) as { signup_enabled?: boolean };
+        const body = (await response.json()) as { signup_enabled?: boolean; google_oauth_enabled?: boolean; google_oauth_error?: string };
         if (!cancelled) {
           setSignupEnabled(body.signup_enabled ?? true);
+          setGoogleOauthEnabled(body.google_oauth_enabled ?? false);
+          setGoogleOauthError(body.google_oauth_error ?? "");
         }
       } catch {
         // Keep signup enabled client-side; the backend remains authoritative.
@@ -45,7 +49,7 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
   async function handlePasswordAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (isSignup && !signupEnabled) {
-      setMessage("An owner account already exists for this SignalBridge workspace. Log in with that account.");
+      setMessage("Signups are disabled for this deployment. Log in with an existing account.");
       return;
     }
     if (isSignup && name.trim().length < 2) {
@@ -95,6 +99,17 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
     }
   }
 
+  async function handleGoogleSignIn() {
+    setBusy(true);
+    setMessage("");
+    try {
+      window.location.assign(`/api/bridge/auth/google/start?next=${encodeURIComponent("/dashboard")}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Google sign-in failed.");
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="auth-shell">
       <aside className="auth-aside">
@@ -113,7 +128,7 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
               Your signals should not wait for you.
             </h1>
             <p className="mt-6 max-w-xl text-lg leading-8 text-zinc-500">
-              Access the owner console for this SignalBridge workspace, connect Telegram, add exchange keys, and keep execution guarded by your rules.
+              Access your SignalBridge workspace, connect Telegram, add exchange keys, and keep execution guarded by your rules.
             </p>
           </div>
 
@@ -141,19 +156,29 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
         <div className="auth-card">
           <div>
             <p className="text-sm font-black uppercase tracking-[0.16em] text-emerald-signal">
-              {isSignup ? "Owner setup" : "Welcome back"}
+              {isSignup ? "Workspace setup" : "Welcome back"}
             </p>
-            <h2 className="mt-3 text-3xl font-black">{isSignup ? "Create owner account" : "Log in to SignalBridge"}</h2>
+            <h2 className="mt-3 text-3xl font-black">{isSignup ? "Create account" : "Log in to SignalBridge"}</h2>
             <p className="mt-3 leading-7 text-zinc-500">
               {isSignup
-                ? "The first account owns this local SignalBridge workspace. Additional accounts do not create separate exchange workspaces."
-                : "Use the owner account for this SignalBridge workspace."}
+                ? "Create a new account to open its own SignalBridge workspace, Telegram session, and exchange settings."
+                : "Use your account to open your own SignalBridge workspace."}
             </p>
           </div>
 
           {isSignup && !signupEnabled ? (
             <div className="mt-7 rounded-lg border border-gold-signal/30 bg-gold-signal/10 px-4 py-3 text-sm font-bold text-gold-signal">
-              An owner account already exists. This deployment is currently single-workspace, so use the login page.
+              Public signup is disabled for this deployment. Use an existing account to continue.
+            </div>
+          ) : null}
+
+          {googleOauthEnabled ? (
+            <button type="button" onClick={handleGoogleSignIn} className="secondary-cta mt-7 w-full" disabled={busy}>
+              Continue with Google
+            </button>
+          ) : googleOauthError ? (
+            <div className="mt-7 rounded-lg border border-zinc-800 bg-zinc-950/70 px-4 py-3 text-sm font-bold text-zinc-400">
+              {googleOauthError}
             </div>
           ) : null}
 
@@ -190,13 +215,13 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
               </>
             ) : signupEnabled ? (
               <>
-                Setting up this workspace?{" "}
+                Need a separate workspace?{" "}
                 <Link href="/signup" className="font-black text-emerald-signal">
-                  Create owner account
+                  Create account
                 </Link>
               </>
             ) : (
-              "This workspace already has an owner account."
+              "Public signup is disabled for this deployment."
             )}
           </p>
         </div>
