@@ -92,6 +92,7 @@ class SessionClaims(AuthModel):
     sub: str
     email: str
     name: str
+    workspace_id: str | None = None
     iat: int
     exp: int
 
@@ -138,13 +139,14 @@ class AuthManager:
                 return user
         raise InvalidCredentialsError("invalid email or password")
 
-    def issue_session(self, user: AuthUser, ttl_seconds: int | None = None) -> str:
+    def issue_session(self, user: AuthUser, ttl_seconds: int | None = None, workspace_id: str | None = None) -> str:
         now = int(time.time())
         ttl = ttl_seconds or _session_ttl_seconds()
         claims = {
             "sub": user.id,
             "email": user.email,
             "name": user.name,
+            "workspace_id": workspace_id,
             "iat": now,
             "exp": now + ttl,
         }
