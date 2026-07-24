@@ -171,11 +171,6 @@ const EXCHANGE_SETUP_GUIDES: Record<ExchangeId, { title: string; steps: string[]
   }
 };
 
-const MODEL_PROVIDER_OPTIONS = [
-  { label: "OpenAI", value: "openai" },
-  { label: "Groq", value: "groq" }
-];
-
 export default function SettingsPage() {
   const defaultApiUrl = process.env.NEXT_PUBLIC_SIGNALBRIDGE_API_URL ?? "";
   // SECURITY: Never expose the bearer token to the frontend.
@@ -183,7 +178,7 @@ export default function SettingsPage() {
   const [connection, setConnection] = useState<BridgeConnection>({ apiUrl: defaultApiUrl, token: "" });
   const [config, setConfig] = useState<ConfigResponse>(emptyConfig);
   const [runtime, setRuntime] = useState<StatusResponse | null>(null);
-  const [secrets, setSecrets] = useState({ exchangeApiKey: "", exchangeApiSecret: "", exchangeApiPassword: "", openaiApiKey: "" });
+  const [secrets, setSecrets] = useState({ exchangeApiKey: "", exchangeApiSecret: "", exchangeApiPassword: "" });
   const [telegramCode, setTelegramCode] = useState("");
   const [telegramPassword, setTelegramPassword] = useState("");
   const [chatSearch, setChatSearch] = useState("");
@@ -259,7 +254,7 @@ export default function SettingsPage() {
         provider: config.openai.provider,
         model: config.openai.model,
         request_timeout_seconds: config.openai.request_timeout_seconds,
-        api_key: secrets.openaiApiKey || null
+        api_key: null
       },
       risk: config.risk
     };
@@ -272,7 +267,7 @@ export default function SettingsPage() {
       body: JSON.stringify(configPayload())
     });
     setConfig(response);
-    setSecrets({ exchangeApiKey: "", exchangeApiSecret: "", exchangeApiPassword: "", openaiApiKey: "" });
+    setSecrets({ exchangeApiKey: "", exchangeApiSecret: "", exchangeApiPassword: "" });
     return response;
   }
 
@@ -386,8 +381,7 @@ export default function SettingsPage() {
               <StepCard number="1" title="Telegram" done={runtime?.telegram.auth_state === "authenticated"} />
               <StepCard number="2" title="Channels" done={config.telegram.monitored_chats.length > 0} />
               <StepCard number="3" title="Exchange key" done={Boolean(config.exchange.api_key_set && config.exchange.api_secret_set)} />
-              <StepCard number="4" title="Parser" done={config.openai.api_key_set} />
-              <StepCard number="5" title="Risk" done={config.risk.fixed_usdt_risk > 0 && config.risk.max_leverage > 0} />
+              <StepCard number="4" title="Risk" done={config.risk.fixed_usdt_risk > 0 && config.risk.max_leverage > 0} />
             </section>
 
             <SimplePanel icon={<RadioTower className="h-5 w-5" />} title="1. Connect Telegram" right={(runtime?.telegram.auth_state ?? "unknown").replace("_", " ")}>
@@ -462,25 +456,7 @@ export default function SettingsPage() {
                 </div>
               </SimplePanel>
 
-              <SimplePanel icon={<ShieldCheck className="h-5 w-5" />} title="4. Configure parser" right={config.openai.provider.toUpperCase()}>
-                <div className="mb-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm leading-6 text-zinc-400">
-                  <p className="font-medium text-zinc-200">If parsing fails with an API key error:</p>
-                  <p className="mt-1">Check the provider, then paste the parser key your deployment uses. If your operator manages the key from environment variables, leave this blank.</p>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <Select label="Provider" value={config.openai.provider} onChange={(value) => setConfig({ ...config, openai: { ...config.openai, provider: value as "openai" | "groq" } })} options={MODEL_PROVIDER_OPTIONS} />
-                  <Field label="Model" value={config.openai.model} onChange={(value) => setConfig({ ...config, openai: { ...config.openai, model: value } })} helper="Use the model name supported by the selected provider." />
-                  <Field label={`Parser API key ${config.openai.api_key_set ? "(already saved)" : ""}`} type="password" value={secrets.openaiApiKey} onChange={(value) => setSecrets({ ...secrets, openaiApiKey: value })} helper="Only needed if the parser key is not supplied by deployment environment variables." />
-                  <Field label="Timeout (seconds)" value={String(config.openai.request_timeout_seconds)} onChange={(value) => setConfig({ ...config, openai: { ...config.openai, request_timeout_seconds: Number(value || 0) } })} helper="Increase this if the parser is slow during busy periods." />
-                </div>
-                <div className="mt-3 rounded-lg border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-xs leading-5 text-emerald-100">
-                  {config.openai.provider === "openai"
-                    ? "OpenAI: create the key in your OpenAI account and keep it private."
-                    : "Groq: create the key in your Groq account and keep it private."}
-                </div>
-              </SimplePanel>
-
-              <SimplePanel icon={<SlidersHorizontal className="h-5 w-5" />} title="5. Choose risk rules" right={config.risk.risk_mode.replace("_", " ")}>
+              <SimplePanel icon={<SlidersHorizontal className="h-5 w-5" />} title="4. Choose risk rules" right={config.risk.risk_mode.replace("_", " ")}>
                 <div className="grid gap-3 md:grid-cols-2">
                   <Select label="Risk mode" value={config.risk.risk_mode} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, risk_mode: value as "fixed_usdt" | "balance_percent" } })} options={[{ label: "Fixed USDT", value: "fixed_usdt" }, { label: "Balance percent", value: "balance_percent" }]} />
                   <Field label="Max leverage" value={String(config.risk.max_leverage)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, max_leverage: Number(value || 0) } })} />
