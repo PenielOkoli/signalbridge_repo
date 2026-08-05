@@ -34,6 +34,7 @@ from signal_parser import (
     ParsedSignal,
     REPLY_MARKET_ACTIVATION_NOTE,
     SignalAction,
+    SignalParserAPIError,
     SignalParser,
     SignalParserError,
     SignalValidationError,
@@ -103,6 +104,7 @@ class BotSupervisor:
         self._bot_task: asyncio.Task[None] | None = None
         self._telegram_client: TelegramClient | None = None
         self._parser: SignalParser | None = None
+        self._parser_unavailable_reason: str | None = None
         self._trader: CcxtFuturesTrader | None = None
         self._pending_login: PendingTelegramLogin | None = None
         self._signal_registry = SignalRegistry()
@@ -175,6 +177,7 @@ class BotSupervisor:
                     config.exchange.encrypted_api_key and config.exchange.encrypted_api_secret
                 ),
                 "openai_configured": parser_key_configured,
+                "parser_operational": parser_key_configured and self._parser_unavailable_reason is None,
                 "risk_mode": config.risk.risk_mode,
                 "daily_trade_limit": config.risk.daily_trade_limit,
                 "max_take_profit_orders": config.risk.max_take_profit_orders,
@@ -196,6 +199,7 @@ class BotSupervisor:
 
             self._bot_state = "starting"
             self._last_error = None
+            self._parser_unavailable_reason = None
             self.log_store.append("info", "starting trading worker")
 
             parser = SignalParser(runtime_secrets.openai_api_key, config.openai)
@@ -571,6 +575,8 @@ class BotSupervisor:
             if parser is None or trader is None:
                 self.log_store.append("warning", "signal received while worker is not armed")
                 return
+            if self._parser_unavailable_reason is not None:
+                return
 
             envelope = await self._build_signal_event_envelope(event, event_type)
 
@@ -655,12 +661,21 @@ class BotSupervisor:
                 )
             except NoTradeSignalError as exc:
                 self.log_store.append("debug", "telegram message ignored", chat=envelope.chat_name, reason=str(exc))
+            except SignalParserAPIError as exc:
+                self._parser_unavailable_reason = str(exc)
+                self._last_error = None
+                self.log_store.append(
+                    "warning",
+                    "signal parser is unavailable; continuing without interrupting the worker",
+                    chat=envelope.chat_name,
+                    detail=str(exc)[:240],
+                )
             except DailyTradeLimitError as exc:
                 self.log_store.append("warning", str(exc), chat=envelope.chat_name)
             except ProtectionOrderError as exc:
                 self.log_store.append("error", str(exc), chat=envelope.chat_name)
             except (SignalParserError, TraderError) as exc:
-                self.log_store.append("error", str(exc), chat=envelope.chat_name)
+                self.log_store.append("warning", str(exc), chat=envelope.chat_name)
             except Exception as exc:
                 self.log_store.append(
                     "error",

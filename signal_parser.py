@@ -747,7 +747,7 @@ def _describe_openai_error(exc: OpenAIError, provider: ModelProvider | str) -> s
     if "insufficient_quota" in lowered or "exceeded your current quota" in lowered:
         return f"{provider_label} API quota exceeded; check billing and usage limits for the configured API key"
     if "invalid_api_key" in lowered or "incorrect api key" in lowered:
-        return f"{provider_label} API key was rejected; open Settings > Parser and update the configured API key"
+        return f"{provider_label} API key was rejected; update the backend parser secret and restart the worker"
     if "rate limit" in lowered:
         return f"{provider_label} rate limit reached; retry shortly or reduce request volume"
     if message:

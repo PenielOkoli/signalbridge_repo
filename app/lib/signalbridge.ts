@@ -40,6 +40,7 @@ export type StatusResponse = {
     exchange_mode: "testnet" | "mainnet";
     exchange_credentials_configured: boolean;
     openai_configured: boolean;
+    parser_operational: boolean;
     risk_mode: "fixed_usdt" | "balance_percent";
     daily_trade_limit: number | null;
     max_take_profit_orders: number;
