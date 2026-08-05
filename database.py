@@ -19,6 +19,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 class Base(DeclarativeBase):
     """Declarative base for all SignalBridge tables."""
