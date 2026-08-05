@@ -590,76 +590,12 @@ class BotSupervisor:
                     event_type=envelope.event_type,
                 )
                 parsed = await parser.parse(envelope.raw_text, parse_context)
-                tracked_signal = self._signal_registry.resolve_reference(
-                    chat_key=envelope.chat_key,
-                    parsed=parsed,
-                    message_id=envelope.message_id,
-                    reply_to_message_id=envelope.reply_to_message_id,
-                )
-                executable_signal, execution_mode, tracked_signal, replacement_cancel_symbol = await self._resolve_executable_signal(
-                    trader,
-                    parsed,
-                    tracked_signal,
-                    envelope,
-                )
-                self.log_store.append(
-                    "trade",
-                    "parsed trade instruction",
-                    chat=envelope.chat_name,
-                    event_type=envelope.event_type,
-                    message_id=envelope.message_id,
-                    reply_to_message_id=envelope.reply_to_message_id,
-                    action=parsed.action,
-                    symbol=executable_signal.symbol or parsed.symbol,
-                    side=parsed.side,
-                    entry_type=parsed.entry_type,
-                    entry=parsed.entry_price,
-                    stop=parsed.stop_loss,
-                    take_profit=parsed.take_profit,
-                    close_fraction=parsed.close_fraction,
-                    is_signal_update=parsed.is_signal_update,
-                    reference_signal_key=tracked_signal.key if tracked_signal is not None else parsed.reference_signal_key,
-                    execution_mode=execution_mode,
-                )
-                result = await self._execute_signal_with_mode(
-                    trader,
-                    executable_signal,
-                    execution_mode,
-                    replacement_cancel_symbol,
-                )
-                signal_snapshot = self._snapshot_after_execution(parsed, executable_signal, result, tracked_signal, execution_mode)
-                tracked_after = self._signal_registry.record_execution(
-                    chat_key=envelope.chat_key,
-                    chat_name=envelope.chat_name,
-                    message_id=envelope.message_id,
-                    raw_message=envelope.raw_text,
-                    signal_snapshot=signal_snapshot,
-                    result=result,
-                    tracked_signal=tracked_signal,
-                )
-                self.log_store.append(
-                    "trade",
-                    "trade instruction executed",
-                    chat=envelope.chat_name,
-                    event_type=envelope.event_type,
-                    message_id=envelope.message_id,
-                    action=result.action,
-                    symbol=result.symbol,
-                    side=result.side,
-                    amount=result.amount,
-                    leverage=result.leverage,
-                    action_order_id=result.action_order_id,
-                    entry_order_id=result.entry_order_id,
-                    stop_loss_order_id=result.stop_loss_order_id,
-                    take_profit_order_id=result.take_profit_order_id,
-                    take_profit_order_ids=result.take_profit_order_ids,
-                    canceled_order_ids=result.canceled_order_ids,
-                    amended_fields=result.amended_fields,
-                    tracked_signal_key=tracked_after.key if tracked_after is not None else None,
-                    execution_mode=execution_mode,
-                    execution_message=result.message,
-                )
+                await self._process_parsed_signal(parser, trader, envelope, parsed, parse_context)
             except NoTradeSignalError as exc:
+                fallback_parsed = SignalParser._parse_structured_signal_card(envelope.raw_text)
+                if fallback_parsed is not None:
+                    await self._process_parsed_signal(parser, trader, envelope, fallback_parsed, parse_context)
+                    return
                 self.log_store.append("debug", "telegram message ignored", chat=envelope.chat_name, reason=str(exc))
             except SignalParserAPIError as exc:
                 self._parser_unavailable_reason = str(exc)
@@ -684,6 +620,84 @@ class BotSupervisor:
                     error=exc.__class__.__name__,
                     detail=str(exc)[:240],
                 )
+
+    async def _process_parsed_signal(
+        self,
+        parser: SignalParser,
+        trader: CcxtFuturesTrader,
+        envelope: SignalEventEnvelope,
+        parsed: ParsedSignal,
+        parse_context: SignalContext,
+    ) -> None:
+        tracked_signal = self._signal_registry.resolve_reference(
+            chat_key=envelope.chat_key,
+            parsed=parsed,
+            message_id=envelope.message_id,
+            reply_to_message_id=envelope.reply_to_message_id,
+        )
+        executable_signal, execution_mode, tracked_signal, replacement_cancel_symbol = await self._resolve_executable_signal(
+            trader,
+            parsed,
+            tracked_signal,
+            envelope,
+        )
+        self.log_store.append(
+            "trade",
+            "parsed trade instruction",
+            chat=envelope.chat_name,
+            event_type=envelope.event_type,
+            message_id=envelope.message_id,
+            reply_to_message_id=envelope.reply_to_message_id,
+            action=parsed.action,
+            symbol=executable_signal.symbol or parsed.symbol,
+            side=parsed.side,
+            entry_type=parsed.entry_type,
+            entry=parsed.entry_price,
+            stop=parsed.stop_loss,
+            take_profit=parsed.take_profit,
+            close_fraction=parsed.close_fraction,
+            is_signal_update=parsed.is_signal_update,
+            reference_signal_key=tracked_signal.key if tracked_signal is not None else parsed.reference_signal_key,
+            execution_mode=execution_mode,
+        )
+        result = await self._execute_signal_with_mode(
+            trader,
+            executable_signal,
+            execution_mode,
+            replacement_cancel_symbol,
+        )
+        signal_snapshot = self._snapshot_after_execution(parsed, executable_signal, result, tracked_signal, execution_mode)
+        tracked_after = self._signal_registry.record_execution(
+            chat_key=envelope.chat_key,
+            chat_name=envelope.chat_name,
+            message_id=envelope.message_id,
+            raw_message=envelope.raw_text,
+            signal_snapshot=signal_snapshot,
+            result=result,
+            tracked_signal=tracked_signal,
+        )
+        self.log_store.append(
+            "trade",
+            "trade instruction executed",
+            chat=envelope.chat_name,
+            event_type=envelope.event_type,
+            message_id=envelope.message_id,
+            action=result.action,
+            symbol=result.symbol,
+            side=result.side,
+            amount=result.amount,
+            leverage=result.leverage,
+            action_order_id=result.action_order_id,
+            entry_order_id=result.entry_order_id,
+            stop_loss_order_id=result.stop_loss_order_id,
+            take_profit_order_id=result.take_profit_order_id,
+            take_profit_order_ids=result.take_profit_order_ids,
+            canceled_order_ids=result.canceled_order_ids,
+            amended_fields=result.amended_fields,
+            tracked_signal_key=tracked_after.key if tracked_after is not None else None,
+            execution_mode=execution_mode,
+            execution_message=result.message,
+        )
 
     def _register_telegram_handler(self, client: TelegramClient, config: AppConfig) -> None:
         @client.on(events.NewMessage(chats=self._normalized_monitored_chat_refs(config.telegram.monitored_chats) or None))
