@@ -164,8 +164,8 @@ export default function DashboardPage() {
     },
     {
       label: "Signal reader",
-      ready: Boolean(status?.config.openai_configured),
-      detail: status?.config.openai_configured ? "Ready" : "Backend setup needed"
+      ready: Boolean(status?.config.parser_operational),
+      detail: status?.config.parser_operational ? "Managed in backend" : "Backend parser unavailable"
     }
   ];
   const completedSteps = setupItems.filter((item) => item.ready).length;
