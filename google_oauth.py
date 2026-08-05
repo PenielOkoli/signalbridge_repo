@@ -15,7 +15,7 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Any
 from urllib import error, parse, request
@@ -238,7 +238,7 @@ def _fetch_json(url: str) -> dict[str, Any]:
 
 
 def _encode_state_payload(payload: OAuthStatePayload) -> str:
-    serialized = json.dumps(payload.__dict__, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    serialized = json.dumps(asdict(payload), separators=(",", ":"), sort_keys=True).encode("utf-8")
     signature = hmac.new(_state_secret().encode("utf-8"), serialized, hashlib.sha256).digest()
     return f"{_b64(serialized)}.{_b64(signature)}"
 
