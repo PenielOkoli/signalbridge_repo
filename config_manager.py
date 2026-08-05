@@ -199,7 +199,7 @@ class OpenAIConfig(SecretModel):
     """Hosted parser model settings."""
 
     provider: ModelProvider = Field(default=ModelProvider.GROQ)
-    model: str = Field(default="llama-3.3-70b-versatile", min_length=1)
+    model: str = Field(default="openai/gpt-oss-120b", min_length=1)
     encrypted_api_key: str = Field(default="", repr=False)
     request_timeout_seconds: int = Field(default=20, ge=1, le=120)
 
