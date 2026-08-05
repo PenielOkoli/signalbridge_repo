@@ -339,6 +339,10 @@ class SignalParser:
         if not clean_message:
             raise NoTradeSignalError("message is empty")
 
+        structured_signal = self._parse_structured_signal_card(clean_message)
+        if structured_signal is not None:
+            return structured_signal
+
         shortcut_signal = await self._maybe_parse_trader_shortcut(clean_message, context)
         if shortcut_signal is not None:
             return shortcut_signal
@@ -465,6 +469,76 @@ class SignalParser:
             "If the message refers to a prior signal, choose reference_signal_key from the provided candidates.\n"
             + json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
         )
+
+    @staticmethod
+    def _parse_structured_signal_card(message: str) -> ParsedSignal | None:
+        """Parse simple signal-card posts without calling the model.
+
+        Many Telegram channels post a compact symbol/side/entry/TP/SL layout with
+        emojis or disclaimer text around it. This fallback captures those posts
+        deterministically so they do not get classified as commentary.
+        """
+
+        symbol = normalize_bybit_linear_symbol(SignalParser._extract_signal_symbol(message))
+        side = SignalParser._extract_signal_side(message)
+        entry_price = SignalParser._extract_labelled_price(message, r"(?im)^\s*(?:📍\s*)?entry\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
+        take_profit = SignalParser._extract_labelled_price(message, r"(?im)^\s*(?:🎯\s*)?(?:take\s*profit|tp)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
+        stop_loss = SignalParser._extract_labelled_price(message, r"(?im)^\s*(?:🛑\s*)?(?:stop\s*loss|sl)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
+
+        if symbol is None or side is None or entry_price is None or take_profit is None or stop_loss is None:
+            return None
+
+        if side == TradeSide.BUY and not (stop_loss < entry_price < take_profit):
+            return None
+        if side == TradeSide.SELL and not (stop_loss > entry_price > take_profit):
+            return None
+
+        return ParsedSignal.model_validate(
+            {
+                "action": SignalAction.OPEN,
+                "symbol": symbol,
+                "side": side,
+                "entry_type": EntryType.LIMIT,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "take_profit_targets": [take_profit],
+                "leverage": None,
+                "close_fraction": None,
+                "move_stop_to_entry": False,
+                "confidence": 0.95,
+                "notes": "deterministic structured signal card",
+                "is_signal_update": False,
+                "reference_signal_key": None,
+                "source_message": message,
+            }
+        )
+
+    @staticmethod
+    def _extract_signal_symbol(message: str) -> str | None:
+        match = re.search(r"(?im)\b([A-Z0-9]{2,20})\s*/\s*USDT\b", message.upper())
+        if match is None:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _extract_signal_side(message: str) -> TradeSide | None:
+        lowered = message.lower()
+        if re.search(r"\b(long|buy|bull|bullish)\b", lowered):
+            return TradeSide.BUY
+        if re.search(r"\b(short|sell|bear|bearish)\b", lowered):
+            return TradeSide.SELL
+        return None
+
+    @staticmethod
+    def _extract_labelled_price(message: str, pattern: str) -> float | None:
+        match = re.search(pattern, message)
+        if match is None:
+            return None
+        try:
+            return float(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
 
     async def _maybe_parse_trader_shortcut(
         self,
