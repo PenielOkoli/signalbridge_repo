@@ -481,9 +481,24 @@ class SignalParser:
 
         symbol = normalize_bybit_linear_symbol(SignalParser._extract_signal_symbol(message))
         side = SignalParser._extract_signal_side(message)
-        entry_price = SignalParser._extract_labelled_price(message, r"(?im)^\s*(?:📍\s*)?entry\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
-        take_profit = SignalParser._extract_labelled_price(message, r"(?im)^\s*(?:🎯\s*)?(?:take\s*profit|tp)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
-        stop_loss = SignalParser._extract_labelled_price(message, r"(?im)^\s*(?:🛑\s*)?(?:stop\s*loss|sl)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
+        entry_price = SignalParser._extract_labelled_price(
+            message,
+            (
+                r"(?im)(?:^|\n)\s*(?:📍\s*)?(?:entry|entry price|ep|open)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b",
+            ),
+        )
+        take_profit = SignalParser._extract_labelled_price(
+            message,
+            (
+                r"(?im)(?:^|\n)\s*(?:🎯\s*)?(?:take\s*profit|tp\d*|target\d*|targets?)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b",
+            ),
+        )
+        stop_loss = SignalParser._extract_labelled_price(
+            message,
+            (
+                r"(?im)(?:^|\n)\s*(?:🛑\s*)?(?:stop\s*loss|sl|stop)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b",
+            ),
+        )
 
         if symbol is None or side is None or entry_price is None or take_profit is None or stop_loss is None:
             return None
@@ -516,10 +531,17 @@ class SignalParser:
 
     @staticmethod
     def _extract_signal_symbol(message: str) -> str | None:
-        match = re.search(r"(?im)\b([A-Z0-9]{2,20})\s*/\s*USDT\b", message.upper())
-        if match is None:
-            return None
-        return match.group(1)
+        normalized = message.upper().replace("-", " ").replace("_", " ")
+        patterns = (
+            r"(?im)\b([A-Z0-9]{2,20})\s*/\s*USDT:USDT\b",
+            r"(?im)\b([A-Z0-9]{2,20})\s*/\s*USDT\b",
+            r"(?im)\b([A-Z0-9]{2,20})\s*USDT\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if match is not None:
+                return match.group(1)
+        return None
 
     @staticmethod
     def _extract_signal_side(message: str) -> TradeSide | None:
@@ -528,17 +550,23 @@ class SignalParser:
             return TradeSide.BUY
         if re.search(r"\b(short|sell|bear|bearish)\b", lowered):
             return TradeSide.SELL
+        if "📈" in message or "🟢" in message:
+            return TradeSide.BUY
+        if "📉" in message or "🔴" in message:
+            return TradeSide.SELL
         return None
 
     @staticmethod
-    def _extract_labelled_price(message: str, pattern: str) -> float | None:
-        match = re.search(pattern, message)
-        if match is None:
-            return None
-        try:
-            return float(match.group(1).replace(",", ""))
-        except ValueError:
-            return None
+    def _extract_labelled_price(message: str, patterns: tuple[str, ...]) -> float | None:
+        for pattern in patterns:
+            match = re.search(pattern, message)
+            if match is None:
+                continue
+            try:
+                return float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+        return None
 
     async def _maybe_parse_trader_shortcut(
         self,
