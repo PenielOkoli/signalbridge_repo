@@ -222,22 +222,6 @@ class RiskConfig(SecretModel):
     max_take_profit_orders: int = Field(default=1, ge=1, le=10)
     enabled_symbols: list[str] = Field(default_factory=list)
 
-    @field_validator("enabled_symbols")
-    @classmethod
-    def validate_enabled_symbols(cls, value: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for symbol in value:
-            normalized_symbol = symbol.strip().upper()
-            if not re.fullmatch(r"[A-Z0-9]{2,20}/USDT:USDT", normalized_symbol):
-                raise ValueError(
-                    "enabled_symbols must use CCXT USDT perpetual format, e.g. BTC/USDT:USDT"
-                )
-            if normalized_symbol not in seen:
-                normalized.append(normalized_symbol)
-                seen.add(normalized_symbol)
-        return normalized
-
     @model_validator(mode="after")
     def validate_risk_mode_settings(self) -> "RiskConfig":
         if self.risk_mode == RiskMode.FIXED_USDT and self.fixed_usdt_risk <= 0:

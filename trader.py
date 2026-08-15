@@ -299,7 +299,6 @@ class CcxtFuturesTrader:
 
         action = signal.action
         if action == SignalAction.OPEN or action == "open":
-            self._validate_symbol_enabled(signal.symbol)
             return await self._execute_open_signal(signal)
         if action == SignalAction.CLOSE or action == "close":
             return await self._close_position(signal)
@@ -495,6 +494,13 @@ class CcxtFuturesTrader:
     async def _execute_open_signal(self, signal: ParsedSignal) -> ExecutionResult:
         await self._enforce_daily_trade_limit()
         sizing = await self.calculate_position_size(signal)
+        current_market_price = await self._resolve_current_market_price(sizing.symbol)
+        self._validate_protective_prices_against_market(
+            side=sizing.side,
+            current_market_price=current_market_price,
+            stop_loss=sizing.stop_loss,
+            take_profit_targets=sizing.take_profit_targets,
+        )
 
         try:
             await self._call_exchange(
@@ -639,6 +645,7 @@ class CcxtFuturesTrader:
         position_side = self._position_side(position)
         position_amount = self._position_contracts(position)
         entry_price = self._position_entry_price(position)
+        current_market_price = await self._resolve_current_market_price(signal.symbol)
 
         existing_stop_loss, existing_take_profit_targets = self._existing_protective_targets(
             snapshot,
@@ -667,7 +674,32 @@ class CcxtFuturesTrader:
             take_profit_targets=take_profit_targets,
             allow_stop_at_entry=signal.move_stop_to_entry,
         )
+        self._validate_protective_prices_against_market(
+            side=position_side,
+            current_market_price=current_market_price,
+            stop_loss=new_stop_loss,
+            take_profit_targets=take_profit_targets,
+        )
         canceled_order_ids = await self._cancel_open_orders_for_symbol(signal.symbol)
+        try:
+            ticker = await self._call_exchange(lambda: self.exchange.fetch_ticker(symbol, params=self._request_params()))
+        except Exception as exc:
+            raise TraderConfigurationError(f"unable to fetch current market price for {symbol}") from exc
+
+        price = self._first_positive_decimal(
+            ticker.get("last"),
+            ticker.get("mark"),
+            ticker.get("bid"),
+            ticker.get("ask"),
+            (ticker.get("info") or {}).get("markPrice"),
+            (ticker.get("info") or {}).get("lastPrice"),
+            ((Decimal(str(ticker["bid"])) + Decimal(str(ticker["ask"]))) / 2)
+            if ticker.get("bid") not in (None, "") and ticker.get("ask") not in (None, "")
+            else None,
+        )
+        if price is None:
+            raise TraderConfigurationError(f"exchange ticker for {symbol} did not include a usable price")
+        return price
 
         if new_stop_loss is not None:
             stop_order = await self._place_reduce_only_trigger_order(
@@ -986,11 +1018,6 @@ class CcxtFuturesTrader:
         if min_cost is not None and notional < Decimal(str(min_cost)):
             raise RiskCalculationError(f"notional {notional} is below exchange minimum {min_cost} for {symbol}")
 
-    def _validate_symbol_enabled(self, symbol: str) -> None:
-        enabled = self.risk_config.enabled_symbols
-        if enabled and symbol not in enabled:
-            raise TraderConfigurationError(f"{symbol} is not enabled in risk.enabled_symbols")
-
     def _effective_leverage(self, signal: ParsedSignal) -> int:
         requested = signal.leverage or self.exchange_config.default_leverage
         return min(requested, self.risk_config.max_leverage)
@@ -1091,6 +1118,40 @@ class CcxtFuturesTrader:
 
         if side != TradeSide.BUY and side != "buy" and side != TradeSide.SELL and side != "sell":
             raise RiskCalculationError(f"unsupported trade side: {side}")
+
+    @staticmethod
+    def _validate_protective_prices_against_market(
+        *,
+        side: TradeSide | str,
+        current_market_price: Decimal,
+        stop_loss: float | None,
+        take_profit_targets: list[float],
+    ) -> None:
+        market_price = float(current_market_price)
+
+        if side == TradeSide.BUY or side == "buy":
+            if stop_loss is not None and stop_loss >= market_price:
+                raise RiskCalculationError(
+                    f"long signal is stale: stop_loss {stop_loss:.4f} is not below the current market price {market_price:.4f}"
+                )
+            if take_profit_targets and any(target <= market_price for target in take_profit_targets):
+                raise RiskCalculationError(
+                    f"long signal is stale: take-profit targets must be above the current market price {market_price:.4f}"
+                )
+            return
+
+        if side == TradeSide.SELL or side == "sell":
+            if stop_loss is not None and stop_loss <= market_price:
+                raise RiskCalculationError(
+                    f"short signal is stale: stop_loss {stop_loss:.4f} is not above the current market price {market_price:.4f}"
+                )
+            if take_profit_targets and any(target >= market_price for target in take_profit_targets):
+                raise RiskCalculationError(
+                    f"short signal is stale: take-profit targets must be below the current market price {market_price:.4f}"
+                )
+            return
+
+        raise RiskCalculationError(f"unsupported trade side: {side}")
 
     @staticmethod
     def _entry_order_type(entry_type: EntryType | str) -> str:

@@ -27,8 +27,7 @@ import {
   type TelegramChatsResponse,
   fetchBridgeJson,
   formatUtcTimestamp,
-  readBridgeConnection,
-  splitLines
+  readBridgeConnection
 } from "../lib/signalbridge";
 
 const emptyConfig: ConfigResponse = {
@@ -50,8 +49,7 @@ const emptyConfig: ConfigResponse = {
     balance_risk_percent: 1,
     max_leverage: 10,
     daily_trade_limit: null,
-    max_take_profit_orders: 1,
-    enabled_symbols: []
+    max_take_profit_orders: 1
   }
 };
 
@@ -381,7 +379,14 @@ export default function SettingsPage() {
               <StepCard number="1" title="Telegram" done={runtime?.telegram.auth_state === "authenticated"} />
               <StepCard number="2" title="Channels" done={config.telegram.monitored_chats.length > 0} />
               <StepCard number="3" title="Exchange key" done={Boolean(config.exchange.api_key_set && config.exchange.api_secret_set)} />
-              <StepCard number="4" title="Risk" done={config.risk.fixed_usdt_risk > 0 && config.risk.max_leverage > 0} />
+              <StepCard
+                number="4"
+                title="Risk"
+                done={
+                  (config.risk.risk_mode === "fixed_usdt" ? config.risk.fixed_usdt_risk > 0 : config.risk.balance_risk_percent > 0) &&
+                  config.risk.max_leverage > 0
+                }
+              />
             </section>
 
             <SimplePanel icon={<RadioTower className="h-5 w-5" />} title="1. Connect Telegram" right={(runtime?.telegram.auth_state ?? "unknown").replace("_", " ")}>
@@ -460,9 +465,11 @@ export default function SettingsPage() {
                 <div className="grid gap-3 md:grid-cols-2">
                   <Select label="Risk mode" value={config.risk.risk_mode} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, risk_mode: value as "fixed_usdt" | "balance_percent" } })} options={[{ label: "Fixed USDT", value: "fixed_usdt" }, { label: "Balance percent", value: "balance_percent" }]} />
                   <Field label="Max leverage" value={String(config.risk.max_leverage)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, max_leverage: Number(value || 0) } })} />
-                  <Field label="Risk per trade in USDT" value={String(config.risk.fixed_usdt_risk)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, fixed_usdt_risk: Number(value || 0) } })} />
-                  <Field label="Risk per trade in %" value={String(config.risk.balance_risk_percent)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, balance_risk_percent: Number(value || 0) } })} />
-                  <TextArea label="Allowed trading symbols" value={config.risk.enabled_symbols.join("\n")} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, enabled_symbols: splitLines(value) } })} />
+                  {config.risk.risk_mode === "fixed_usdt" ? (
+                    <Field label="Risk per trade in USDT" value={String(config.risk.fixed_usdt_risk)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, fixed_usdt_risk: Number(value || 0) } })} />
+                  ) : (
+                    <Field label="Risk per trade in %" value={String(config.risk.balance_risk_percent)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, balance_risk_percent: Number(value || 0) } })} />
+                  )}
                 </div>
               </SimplePanel>
             </section>
@@ -595,15 +602,6 @@ function Select({ label, value, onChange, options }: { label: string; value: str
           </option>
         ))}
       </select>
-    </label>
-  );
-}
-
-function TextArea({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="block md:col-span-2">
-      <span className="mb-1 block text-sm font-medium text-zinc-300">{label}</span>
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={4} className="thin-scrollbar w-full resize-y rounded-lg border border-white/10 bg-[#07080c] px-3 py-3 text-sm text-zinc-200 outline-none transition focus:border-emerald-signal/70 focus:ring-2 focus:ring-emerald-signal/15" placeholder="BTC/USDT:USDT" />
     </label>
   );
 }

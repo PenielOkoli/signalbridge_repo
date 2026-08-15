@@ -98,7 +98,6 @@ class RiskConfigPayload(BaseModel):
     max_leverage: int = Field(default=10, ge=1, le=125)
     daily_trade_limit: int | None = Field(default=None, ge=1)
     max_take_profit_orders: int = Field(default=1, ge=1, le=10)
-    enabled_symbols: list[str] = Field(default_factory=list)
 
 
 class SecurityConfigPayload(BaseModel):

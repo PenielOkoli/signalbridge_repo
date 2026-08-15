@@ -131,7 +131,6 @@ export type ConfigResponse = {
     max_leverage: number;
     daily_trade_limit: number | null;
     max_take_profit_orders: number;
-    enabled_symbols: string[];
   };
 };
 
@@ -218,11 +217,4 @@ export function formatUtcTimestamp(value: string | null) {
     hour12: false,
     timeZone: "UTC"
   }).format(new Date(value));
-}
-
-export function splitLines(value: string) {
-  return value
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
