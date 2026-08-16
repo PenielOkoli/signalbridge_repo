@@ -91,7 +91,7 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
         return;
       }
 
-      window.location.assign("/dashboard");
+      window.location.assign(isSignup ? "/onboarding" : "/dashboard");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Authentication failed.");
     } finally {
