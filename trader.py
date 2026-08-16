@@ -181,6 +181,10 @@ class ExecutionResult(TraderModel):
     amended_fields: list[str] = Field(default_factory=list)
     protective_orders_native: bool = False
     close_fraction: float | None = None
+    entry_price: float | None = None
+    stop_loss: float | None = None
+    take_profit_targets: list[float] = Field(default_factory=list)
+    risk_usdt: float | None = None
     raw_entry_status: str | None = None
     message: str = ""
 
@@ -626,6 +630,10 @@ class CcxtFuturesTrader:
             take_profit_order_id=take_profit_order_ids[0] if take_profit_order_ids else None,
             take_profit_order_ids=take_profit_order_ids,
             protective_orders_native=use_native_protection,
+            entry_price=sizing.entry_price,
+            stop_loss=sizing.stop_loss,
+            take_profit_targets=sizing.take_profit_targets,
+            risk_usdt=sizing.risk_usdt,
             raw_entry_status=entry_order.get("status") if entry_order else None,
             message=message
         )
@@ -790,6 +798,9 @@ class CcxtFuturesTrader:
             canceled_order_ids=canceled_order_ids,
             amended_fields=amended_fields,
             protective_orders_native=used_native_protection,
+            entry_price=entry_price,
+            stop_loss=new_stop_loss,
+            take_profit_targets=take_profit_targets,
             message="protective orders amended",
         )
 

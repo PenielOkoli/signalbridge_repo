@@ -34,6 +34,7 @@ from signal_parser import (
     ParsedSignal,
     REPLY_MARKET_ACTIVATION_NOTE,
     SignalAction,
+    SignalContext,
     SignalParserAPIError,
     SignalParser,
     SignalParserError,
@@ -568,6 +569,76 @@ class BotSupervisor:
         elif live_client is not None:
             await live_client.disconnect()
 
+    async def _send_self_notification(self, text: str) -> None:
+        """Send a status message to the bot's own Telegram account (Saved Messages)."""
+        client = self._telegram_client
+        if client is None:
+            return
+        try:
+            await client.send_message("me", text)
+        except Exception as exc:
+            self.log_store.append(
+                "warning",
+                "failed to send Telegram notification",
+                error_type=exc.__class__.__name__,
+                error_detail=str(exc)[:240],
+            )
+
+    @staticmethod
+    def _format_price(value: float | None) -> str:
+        if value is None:
+            return "-"
+        return f"{value:g}"
+
+    def _format_take_profits(self, targets: list[float]) -> str:
+        if not targets:
+            return "-"
+        return ", ".join(self._format_price(target) for target in targets)
+
+    async def _notify_signal_result(self, envelope: SignalEventEnvelope, result: Any) -> None:
+        action = result.action
+        symbol = result.symbol or "-"
+        side = (result.side or "").upper()
+        chat = envelope.chat_name or "unknown channel"
+
+        if action == SignalAction.OPEN or action == "open":
+            lines = [
+                f"\U0001F7E2 Executed \u2014 {symbol} {side}".rstrip(),
+                f"From: {chat}",
+                f"Entry {self._format_price(result.entry_price)} \u00b7 SL {self._format_price(result.stop_loss)} \u00b7 TP {self._format_take_profits(result.take_profit_targets)}",
+            ]
+            if result.risk_usdt is not None:
+                leverage_part = f" \u00b7 {result.leverage}x" if result.leverage else ""
+                lines.append(f"Risk: ${result.risk_usdt:.2f}{leverage_part}")
+            await self._send_self_notification("\n".join(lines))
+        elif action == SignalAction.AMEND or action == "amend":
+            changes = []
+            if "stop_loss" in result.amended_fields:
+                changes.append(f"SL \u2192 {self._format_price(result.stop_loss)}")
+            if "take_profit" in result.amended_fields:
+                changes.append(f"TP \u2192 {self._format_take_profits(result.take_profit_targets)}")
+            change_text = ", ".join(changes) if changes else "position updated"
+            lines = [f"\U0001F504 Updated \u2014 {symbol}", f"From: {chat}", change_text]
+            await self._send_self_notification("\n".join(lines))
+        elif action == SignalAction.CLOSE or action == "close":
+            portion = ""
+            if result.close_fraction is not None and result.close_fraction < 1:
+                portion = f" ({result.close_fraction * 100:.0f}%)"
+            lines = [f"\U0001F504 Closed \u2014 {symbol}", f"From: {chat}", f"Position closed{portion}"]
+            await self._send_self_notification("\n".join(lines))
+
+    async def _notify_signal_skipped(self, envelope: SignalEventEnvelope, reason: str) -> None:
+        lines = [f"\U0001F534 Skipped \u2014 {envelope.chat_name or 'unknown channel'}", f"Reason: {reason}"]
+        await self._send_self_notification("\n".join(lines))
+
+    async def _notify_protection_failed(self, envelope: SignalEventEnvelope, reason: str) -> None:
+        lines = [
+            f"\u26A0\uFE0F Entry placed, protection FAILED \u2014 {envelope.chat_name or 'unknown channel'}",
+            reason,
+            "Check your position manually.",
+        ]
+        await self._send_self_notification("\n".join(lines))
+        
     async def _handle_signal_event(self, event: Any, event_type: Literal["new_message", "edited_message"]) -> None:
         async with self._signal_event_lock:
             parser = self._parser
@@ -608,10 +679,13 @@ class BotSupervisor:
                 )
             except DailyTradeLimitError as exc:
                 self.log_store.append("warning", str(exc), chat=envelope.chat_name)
+                await self._notify_signal_skipped(envelope, str(exc))
             except ProtectionOrderError as exc:
                 self.log_store.append("error", str(exc), chat=envelope.chat_name)
+                await self._notify_protection_failed(envelope, str(exc))
             except (SignalParserError, TraderError) as exc:
                 self.log_store.append("warning", str(exc), chat=envelope.chat_name)
+                await self._notify_signal_skipped(envelope, str(exc))
             except Exception as exc:
                 self.log_store.append(
                     "error",
@@ -620,6 +694,7 @@ class BotSupervisor:
                     error=exc.__class__.__name__,
                     detail=str(exc)[:240],
                 )
+                await self._notify_signal_skipped(envelope, "unexpected error while processing this signal")
 
     async def _process_parsed_signal(
         self,
@@ -698,6 +773,7 @@ class BotSupervisor:
             execution_mode=execution_mode,
             execution_message=result.message,
         )
+        await self._notify_signal_result(envelope, result)
 
     def _register_telegram_handler(self, client: TelegramClient, config: AppConfig) -> None:
         @client.on(events.NewMessage(chats=self._normalized_monitored_chat_refs(config.telegram.monitored_chats) or None))
