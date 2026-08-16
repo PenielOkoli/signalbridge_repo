@@ -174,6 +174,7 @@ export default function DashboardPage() {
   const pageState = !status ? "Connecting..." : botRunning ? "Bot running" : readyForTrading ? "Ready to start" : "Finish setup";
   const openPositions = exchangeState?.open_positions ?? [];
   const livePnl = sumNullable(openPositions.map((position) => position.unrealized_pnl));
+  const realizedPnl = sumNullable(openPositions.map((position) => position.realized_pnl));
 
   return (
     <main className="app-shell">
@@ -255,6 +256,7 @@ export default function DashboardPage() {
                   <SimpleRow label="Bot" value={status?.bot.state ?? "offline"} />
                   <SimpleRow label="Exchange" value={`${formatExchangeId(status?.config.exchange_id)} ${status?.config.exchange_mode ?? ""}`} />
                   <SimpleRow label="Live PnL" value={formatMoney(livePnl)} tone={pnlTone(livePnl)} />
+                  <SimpleRow label="Realized PnL" value={formatMoney(realizedPnl)} tone={pnlTone(realizedPnl)} />
                   <SimpleRow label="Balance" value={displayNumber(exchangeState?.free_usdt)} />
                 </div>
               </div>
@@ -277,6 +279,7 @@ export default function DashboardPage() {
                   <SimpleRow label="Open positions" value={String(exchangeState?.total_open_positions ?? 0)} />
                   <SimpleRow label="Open orders" value={String(exchangeState?.total_open_orders ?? 0)} />
                   <SimpleRow label="Live PnL" value={formatMoney(livePnl)} tone={pnlTone(livePnl)} />
+                  <SimpleRow label="Realized PnL" value={formatMoney(realizedPnl)} tone={pnlTone(realizedPnl)} />
                   <SimpleRow label="Free USDT" value={displayNumber(exchangeState?.free_usdt)} />
                   <SimpleRow label="Total USDT" value={displayNumber(exchangeState?.total_usdt)} />
                 </div>
@@ -296,6 +299,7 @@ export default function DashboardPage() {
                         <th className="px-4 py-3 font-semibold">Entry</th>
                         <th className="px-4 py-3 font-semibold">Mark</th>
                         <th className="px-4 py-3 text-right font-semibold">Live PnL</th>
+                        <th className="px-4 py-3 text-right font-semibold">Realized PnL</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
@@ -308,6 +312,9 @@ export default function DashboardPage() {
                           <td className="mono-num px-4 py-3 text-sm text-zinc-200">{displayNumber(position.mark_price)}</td>
                           <td className={`mono-num px-4 py-3 text-right text-sm font-bold ${pnlTextClass(position.unrealized_pnl)}`}>
                             {formatMoney(position.unrealized_pnl)}
+                          </td>
+                          <td className={`mono-num px-4 py-3 text-right text-sm font-bold ${pnlTextClass(position.realized_pnl)}`}>
+                            {formatMoney(position.realized_pnl)}
                           </td>
                         </tr>
                       ))}

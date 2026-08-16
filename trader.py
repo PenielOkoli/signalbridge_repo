@@ -195,6 +195,7 @@ class ExchangePositionView(TraderModel):
     mark_price: float | None = None
     leverage: float | None = None
     liquidation_price: float | None = None
+    realized_pnl: float | None = None
     unrealized_pnl: float | None = None
     notional_usdt: float | None = None
 
@@ -393,6 +394,14 @@ class CcxtFuturesTrader:
                 position.get("unrealizedPnlValue"),
                 (position.get("info") or {}).get("unrealisedPnl"),
             )
+            # ccxt's bybit parse_position() reads 'curRealisedPnl' for
+            # realizedPnl, but Bybit's open-positions endpoint only ever
+            # returns 'cumRealisedPnl' -- so the unified field is always
+            # null here. Read the raw field directly instead.
+            realized_pnl = self._to_float_or_none(
+                position.get("realizedPnl"),
+                (position.get("info") or {}).get("cumRealisedPnl"),
+            )
             reference_price = mark_price if mark_price and mark_price > 0 else entry_price
             notional_usdt = round(contracts * reference_price, 4) if reference_price and reference_price > 0 else None
 
@@ -406,6 +415,7 @@ class CcxtFuturesTrader:
                     leverage=leverage,
                     liquidation_price=liquidation_price,
                     unrealized_pnl=unrealized_pnl,
+                    realized_pnl=realized_pnl,
                     notional_usdt=notional_usdt,
                 )
             )
@@ -721,25 +731,6 @@ class CcxtFuturesTrader:
             take_profit_targets=take_profit_targets,
         )
         canceled_order_ids = await self._cancel_open_orders_for_symbol(signal.symbol)
-        try:
-            ticker = await self._call_exchange(lambda: self.exchange.fetch_ticker(symbol, params=self._request_params()))
-        except Exception as exc:
-            raise TraderConfigurationError(f"unable to fetch current market price for {symbol}") from exc
-
-        price = self._first_positive_decimal(
-            ticker.get("last"),
-            ticker.get("mark"),
-            ticker.get("bid"),
-            ticker.get("ask"),
-            (ticker.get("info") or {}).get("markPrice"),
-            (ticker.get("info") or {}).get("lastPrice"),
-            ((Decimal(str(ticker["bid"])) + Decimal(str(ticker["ask"]))) / 2)
-            if ticker.get("bid") not in (None, "") and ticker.get("ask") not in (None, "")
-            else None,
-        )
-        if price is None:
-            raise TraderConfigurationError(f"exchange ticker for {symbol} did not include a usable price")
-        return price
 
         attach_take_profit_natively = is_bybit and len(take_profit_targets) == 1
         remaining_take_profit_targets = take_profit_targets
@@ -918,6 +909,39 @@ class CcxtFuturesTrader:
         )
         if price is None:
             raise RiskCalculationError(f"exchange ticker for {signal.symbol} did not include a usable price")
+        return price
+
+    async def _resolve_current_market_price(self, symbol: str) -> Decimal:
+        try:
+            ticker = await self._call_exchange(
+                lambda: self.exchange.fetch_ticker(
+                    symbol,
+                    params=self._request_params(),
+                )
+            )
+        except Exception as exc:
+            raise TraderConfigurationError(
+                f"unable to fetch current market price for {symbol}"
+            ) from exc
+
+        price = self._first_positive_decimal(
+            ticker.get("last"),
+            ticker.get("mark"),
+            ticker.get("bid"),
+            ticker.get("ask"),
+            (ticker.get("info") or {}).get("markPrice"),
+            (ticker.get("info") or {}).get("lastPrice"),
+            (
+                (Decimal(str(ticker["bid"])) + Decimal(str(ticker["ask"]))) / 2
+                if ticker.get("bid") not in (None, "")
+                and ticker.get("ask") not in (None, "")
+                else None
+            ),
+        )
+        if price is None:
+            raise TraderConfigurationError(
+                f"exchange ticker for {symbol} did not include a usable price"
+            )
         return price
 
     async def _resolve_risk_budget_usdt(self) -> Decimal:

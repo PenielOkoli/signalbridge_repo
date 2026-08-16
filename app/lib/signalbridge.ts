@@ -56,6 +56,7 @@ export type ExchangePosition = {
   leverage: number | null;
   liquidation_price: number | null;
   unrealized_pnl: number | null;
+  realized_pnl: number | null;
   notional_usdt: number | null;
 };
 
