@@ -118,7 +118,7 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
             <span className="brand-mark">SB</span>
             <span>
               <span className="block text-sm font-black uppercase tracking-[0.22em]">SignalBridge</span>
-              <span className="block text-xs font-bold text-zinc-500">Trading signal copier</span>
+              <span className="block text-xs font-bold text-ink-3">Trading signal copier</span>
             </span>
           </Link>
 
@@ -127,22 +127,22 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
             <h1 className="mt-4 text-5xl font-black leading-none sm:text-7xl">
               Your signals should not wait for you.
             </h1>
-            <p className="mt-6 max-w-xl text-lg leading-8 text-zinc-500">
+            <p className="mt-6 max-w-xl text-lg leading-8 text-ink-3">
               Access your SignalBridge workspace, connect Telegram, add exchange keys, and keep execution guarded by your rules.
             </p>
           </div>
 
-          <div className="grid gap-3 text-sm font-bold text-zinc-500 sm:grid-cols-3">
+          <div className="grid gap-3 text-sm font-bold text-ink-3 sm:grid-cols-3">
             <span className="flex items-center gap-2">
-              <ShieldCheck className="h-4 w-4 text-emerald-signal" />
+              <ShieldCheck className="h-4 w-4 text-accent" />
               Minimal API permissions
             </span>
             <span className="flex items-center gap-2">
-              <ShieldCheck className="h-4 w-4 text-emerald-signal" />
+              <ShieldCheck className="h-4 w-4 text-accent" />
               Channel-level control
             </span>
             <span className="flex items-center gap-2">
-              <ShieldCheck className="h-4 w-4 text-emerald-signal" />
+              <ShieldCheck className="h-4 w-4 text-accent" />
               Full execution log
             </span>
           </div>
@@ -155,11 +155,11 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
         </div>
         <div className="auth-card">
           <div>
-            <p className="text-sm font-black uppercase tracking-[0.16em] text-emerald-signal">
+            <p className="text-sm font-black uppercase tracking-[0.16em] text-accent">
               {isSignup ? "Workspace setup" : "Welcome back"}
             </p>
             <h2 className="mt-3 text-3xl font-black">{isSignup ? "Create account" : "Log in to SignalBridge"}</h2>
-            <p className="mt-3 leading-7 text-zinc-500">
+            <p className="mt-3 leading-7 text-ink-3">
               {isSignup
                 ? "Create a new account to open its own SignalBridge workspace, Telegram session, and exchange settings."
                 : "Use your account to open your own SignalBridge workspace."}
@@ -167,7 +167,7 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
           </div>
 
           {isSignup && !signupEnabled ? (
-            <div className="mt-7 rounded-lg border border-gold-signal/30 bg-gold-signal/10 px-4 py-3 text-sm font-bold text-gold-signal">
+            <div className="mt-7 rounded-lg border border-warn/30 bg-warn/10 px-4 py-3 text-sm font-bold text-warn">
               Public signup is disabled for this deployment. Use an existing account to continue.
             </div>
           ) : null}
@@ -177,7 +177,7 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
               Continue with Google
             </button>
           ) : googleOauthError ? (
-            <div className="mt-7 rounded-lg border border-zinc-800 bg-zinc-950/70 px-4 py-3 text-sm font-bold text-zinc-400">
+            <div className="mt-7 rounded-lg border border-panel-2 bg-field px-4 py-3 text-sm font-bold text-ink-2">
               {googleOauthError}
             </div>
           ) : null}
@@ -185,16 +185,16 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
           <form className="mt-7 grid gap-4" onSubmit={handlePasswordAuth}>
             {isSignup ? (
               <label className="grid gap-2">
-                <span className="text-xs font-black uppercase tracking-[0.14em] text-zinc-500">Name</span>
+                <span className="text-xs font-black uppercase tracking-[0.14em] text-ink-3">Name</span>
                 <input className="auth-input" value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" />
               </label>
             ) : null}
             <label className="grid gap-2">
-              <span className="text-xs font-black uppercase tracking-[0.14em] text-zinc-500">Email</span>
+              <span className="text-xs font-black uppercase tracking-[0.14em] text-ink-3">Email</span>
               <input className="auth-input" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" inputMode="email" />
             </label>
             <label className="grid gap-2">
-              <span className="text-xs font-black uppercase tracking-[0.14em] text-zinc-500">Password</span>
+              <span className="text-xs font-black uppercase tracking-[0.14em] text-ink-3">Password</span>
               <input className="auth-input" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete={isSignup ? "new-password" : "current-password"} />
             </label>
 
@@ -205,18 +205,18 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
             </button>
           </form>
 
-          <p className="mt-7 text-center text-sm text-zinc-500">
+          <p className="mt-7 text-center text-sm text-ink-3">
             {isSignup ? (
               <>
                 Already have an account?{" "}
-                <Link href="/login" className="font-black text-emerald-signal">
+                <Link href="/login" className="font-black text-accent">
                   Log in
                 </Link>
               </>
             ) : signupEnabled ? (
               <>
                 Need a separate workspace?{" "}
-                <Link href="/signup" className="font-black text-emerald-signal">
+                <Link href="/signup" className="font-black text-accent">
                   Create account
                 </Link>
               </>
