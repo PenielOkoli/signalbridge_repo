@@ -12,6 +12,7 @@ workflow for USDT perpetuals on supported CCXT exchanges:
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -178,6 +179,7 @@ class ExecutionResult(TraderModel):
     take_profit_order_ids: list[str] = Field(default_factory=list)
     canceled_order_ids: list[str] = Field(default_factory=list)
     amended_fields: list[str] = Field(default_factory=list)
+    protective_orders_native: bool = False
     close_fraction: float | None = None
     raw_entry_status: str | None = None
     message: str = ""
@@ -516,6 +518,20 @@ class CcxtFuturesTrader:
         stop_order: dict[str, Any] | None = None
         take_profit_orders: list[dict[str, Any]] = []
 
+        # Bybit's position/trading-stop endpoint attaches SL/TP directly to
+        # the position instead of creating separate conditional orders, but
+        # it requires the position to already exist -- so it's only used for
+        # market entries. Limit entries fall back to conditional orders
+        # below since the position may not exist yet when this runs. It also
+        # only holds one TP price at a time, so multi-target take-profit
+        # signals keep using conditional orders for every target.
+        
+        use_native_protection = (
+            self.exchange_id == ExchangeId.BYBIT.value
+            and sizing.entry_type not in (EntryType.LIMIT, "limit")
+        )
+        attach_take_profit_natively = use_native_protection and len(sizing.take_profit_targets) == 1
+
         try:
             entry_order_params = self._entry_order_params(sizing.entry_type)
             if sizing.entry_type in (EntryType.LIMIT, "limit"):
@@ -537,32 +553,41 @@ class CcxtFuturesTrader:
 
         self._record_trade_execution()
 
+        remaining_take_profit_targets = [] if attach_take_profit_natively else sizing.take_profit_targets
         try:
-            stop_order = await self._place_reduce_only_trigger_order(
-                symbol=sizing.symbol,
-                close_side=self._opposite_side(sizing.side),
-                amount=sizing.amount,
-                trigger_price=sizing.stop_loss,
-                trigger_direction=self._trigger_direction(sizing.side, is_take_profit=False),
-                is_take_profit=False,
-            )
-
-            tp_amounts = self._split_amount_across_targets(
-                sizing.symbol,
-                Decimal(str(sizing.amount)),
-                len(sizing.take_profit_targets),
-            )
-            for take_profit_target, take_profit_amount in zip(sizing.take_profit_targets, tp_amounts, strict=True):
-                take_profit_orders.append(
-                    await self._place_reduce_only_trigger_order(
-                        symbol=sizing.symbol,
-                        close_side=self._opposite_side(sizing.side),
-                        amount=take_profit_amount,
-                        trigger_price=take_profit_target,
-                        trigger_direction=self._trigger_direction(sizing.side, is_take_profit=True),
-                        is_take_profit=True,
-                    )
+            if use_native_protection:
+                await self._set_native_position_protection(
+                    symbol=sizing.symbol,
+                    stop_loss=sizing.stop_loss,
+                    take_profit=sizing.take_profit_targets[0] if attach_take_profit_natively else None,
                 )
+            else:
+                stop_order = await self._place_reduce_only_trigger_order(
+                    symbol=sizing.symbol,
+                    close_side=self._opposite_side(sizing.side),
+                    amount=sizing.amount,
+                    trigger_price=sizing.stop_loss,
+                    trigger_direction=self._trigger_direction(sizing.side, is_take_profit=False),
+                    is_take_profit=False,
+                )
+
+            if remaining_take_profit_targets:
+                tp_amounts = self._split_amount_across_targets(
+                    sizing.symbol,
+                    Decimal(str(sizing.amount)),
+                    len(remaining_take_profit_targets),
+                 )
+                for take_profit_target, take_profit_amount in zip(remaining_take_profit_targets, tp_amounts, strict=True):
+                    take_profit_orders.append(
+                        await self._place_reduce_only_trigger_order(
+                            symbol=sizing.symbol,
+                            close_side=self._opposite_side(sizing.side),
+                            amount=take_profit_amount,
+                            trigger_price=take_profit_target,
+                            trigger_direction=self._trigger_direction(sizing.side, is_take_profit=True),
+                            is_take_profit=True,
+                        )
+                    )
         except Exception as exc:
             entry_id = self._order_id(entry_order)
             raise ProtectionOrderError(
@@ -572,6 +597,13 @@ class CcxtFuturesTrader:
         take_profit_order_ids = [order_id for order_id in (self._order_id(order) for order in take_profit_orders) if order_id]
         action_order_id = self._order_id(entry_order)
 
+        message = "entry and protective orders submitted"
+        if use_native_protection:
+            message = (
+                "entry submitted; stop-loss and take-profit attached natively to the position"
+                if attach_take_profit_natively
+                else "entry submitted; stop-loss attached natively to the position, take-profit orders submitted separately"
+            )
         return ExecutionResult(
             action=SignalAction.OPEN,
             symbol=sizing.symbol,
@@ -583,8 +615,9 @@ class CcxtFuturesTrader:
             stop_loss_order_id=self._order_id(stop_order),
             take_profit_order_id=take_profit_order_ids[0] if take_profit_order_ids else None,
             take_profit_order_ids=take_profit_order_ids,
+            protective_orders_native=use_native_protection,
             raw_entry_status=entry_order.get("status") if entry_order else None,
-            message="entry and protective orders submitted",
+            message=message
         )
 
     async def _cancel_orders(self, symbol: str) -> ExecutionResult:
@@ -645,6 +678,7 @@ class CcxtFuturesTrader:
         position_side = self._position_side(position)
         position_amount = self._position_contracts(position)
         entry_price = self._position_entry_price(position)
+        is_bybit = self.exchange_id == ExchangeId.BYBIT.value
         current_market_price = await self._resolve_current_market_price(signal.symbol)
 
         existing_stop_loss, existing_take_profit_targets = self._existing_protective_targets(
@@ -654,6 +688,12 @@ class CcxtFuturesTrader:
             entry_price,
         )
 
+        if is_bybit:
+            native_stop_loss, native_take_profit = self._position_native_protection(position)
+            if native_stop_loss is not None:
+                existing_stop_loss = native_stop_loss
+            if native_take_profit is not None and not existing_take_profit_targets:
+                existing_take_profit_targets = [native_take_profit]
         amended_fields: list[str] = []
         stop_order: dict[str, Any] | None = None
         take_profit_orders: list[dict[str, Any]] = []
@@ -701,7 +741,23 @@ class CcxtFuturesTrader:
             raise TraderConfigurationError(f"exchange ticker for {symbol} did not include a usable price")
         return price
 
-        if new_stop_loss is not None:
+        attach_take_profit_natively = is_bybit and len(take_profit_targets) == 1
+        remaining_take_profit_targets = take_profit_targets
+        used_native_protection = False
+
+        if is_bybit and (new_stop_loss is not None or attach_take_profit_natively):
+            await self._set_native_position_protection(
+                symbol=signal.symbol,
+                stop_loss=new_stop_loss,
+                take_profit=take_profit_targets[0] if attach_take_profit_natively else None,
+            )
+            used_native_protection = True
+            if new_stop_loss is not None:
+                amended_fields.append("stop_loss")
+            if attach_take_profit_natively:
+                amended_fields.append("take_profit")
+                remaining_take_profit_targets = []
+        elif new_stop_loss is not None:
             stop_order = await self._place_reduce_only_trigger_order(
                 symbol=signal.symbol,
                 close_side=self._opposite_side(position_side),
@@ -712,9 +768,9 @@ class CcxtFuturesTrader:
             )
             amended_fields.append("stop_loss")
 
-        if take_profit_targets:
-            tp_amounts = self._split_amount_across_targets(signal.symbol, position_amount, len(take_profit_targets))
-            for take_profit_target, tp_amount in zip(take_profit_targets, tp_amounts, strict=True):
+        if remaining_take_profit_targets:
+            tp_amounts = self._split_amount_across_targets(signal.symbol, position_amount, len(remaining_take_profit_targets))
+            for take_profit_target, tp_amount in zip(remaining_take_profit_targets, tp_amounts, strict=True):
                 take_profit_orders.append(
                     await self._place_reduce_only_trigger_order(
                         symbol=signal.symbol,
@@ -725,7 +781,8 @@ class CcxtFuturesTrader:
                         is_take_profit=True,
                     )
                 )
-            amended_fields.append("take_profit")
+            if "take_profit" not in amended_fields:
+                amended_fields.append("take_profit")
 
         if not amended_fields:
             raise TraderConfigurationError("amend signal did not contain a supported protective-order change")
@@ -741,6 +798,7 @@ class CcxtFuturesTrader:
             take_profit_order_ids=take_profit_order_ids,
             canceled_order_ids=canceled_order_ids,
             amended_fields=amended_fields,
+            protective_orders_native=used_native_protection,
             message="protective orders amended",
         )
 
@@ -793,6 +851,49 @@ class CcxtFuturesTrader:
                 price=None,
                 params=self._protection_order_params(trigger_price, trigger_direction),
             )
+        )
+
+    async def _set_native_position_protection(
+        self,
+        symbol: str,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        attempts: int = 3,
+    ) -> None:
+        """Attach stop-loss/take-profit directly to an open Bybit position via
+        the position/trading-stop endpoint, instead of separate conditional
+        orders. Only fields that are provided are changed; omitting one
+        leaves the position's existing value untouched.
+        """
+        if stop_loss is None and take_profit is None:
+            return
+
+        market = self.exchange.market(symbol)
+        request = dict(self._request_params())
+        request["symbol"] = market["id"]
+        request["positionIdx"] = 0
+        request["tpslMode"] = "Full"
+        if stop_loss is not None:
+            request["stopLoss"] = self.exchange.price_to_precision(symbol, stop_loss)
+        if take_profit is not None:
+            request["takeProfit"] = self.exchange.price_to_precision(symbol, take_profit)
+
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                await self._call_exchange(
+                    lambda: self.exchange.private_post_v5_position_trading_stop(request)
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                # Bybit can briefly lag between an order fill and the
+                # position becoming visible to this endpoint. Retry a
+                # couple of times before surfacing the failure.
+                if attempt < attempts - 1:
+                    await asyncio.sleep(0.5)
+        raise ProtectionOrderError(
+            f"failed to attach native stop-loss/take-profit for {symbol}: {self._exchange_error_detail(last_error)}"
         )
 
     async def _resolve_reference_entry_price(self, signal: ParsedSignal) -> Decimal:
@@ -1308,6 +1409,22 @@ class CcxtFuturesTrader:
             if numeric > 0:
                 return numeric
         raise PositionLookupError("position entry price could not be determined")
+
+        @staticmethod
+        def _position_native_protection(position: dict[str, Any]) -> tuple[float | None, float | None]:
+            """Read Bybit's native position-attached stop-loss/take-profit, if any."""
+            info = position.get("info") or {}
+
+            def _positive_or_none(value: Any) -> float | None:
+                if value in (None, ""):
+                    return None
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    return None
+                return numeric if numeric > 0 else None
+
+            return _positive_or_none(info.get("stopLoss")), _positive_or_none(info.get("takeProfit"))
 
 
 BybitTrader = CcxtFuturesTrader
