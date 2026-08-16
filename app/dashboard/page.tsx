@@ -203,17 +203,17 @@ export default function DashboardPage() {
             <section className="simple-hero-card">
               <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
                 <div className="max-w-2xl">
-                  <div className={`simple-status-dot ${botRunning ? "bg-emerald-signal" : readyForTrading ? "bg-gold-signal" : "bg-red-400"}`} />
-                  <h2 className="mt-4 text-3xl font-bold text-zinc-50">{pageState}</h2>
-                  <p className="mt-2 max-w-xl text-base leading-7 text-zinc-400">
+                  <div className={`simple-status-dot ${botRunning ? "bg-accent" : readyForTrading ? "bg-warn" : "bg-danger"}`} />
+                  <h2 className="mt-4 text-3xl font-bold text-ink-1">{pageState}</h2>
+                  <p className="mt-2 max-w-xl text-base leading-7 text-ink-2">
                     {botRunning
                       ? "SignalBridge is watching your selected Telegram channels and can place trades."
                       : readyForTrading
                         ? "Everything important is connected. You can start the bot when you are ready."
                         : "Complete the setup checklist before starting the trading bot."}
                   </p>
-                  {errorMessage ? <p className="mt-3 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-200">{errorMessage}</p> : null}
-                  <p className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-400">
+                  {errorMessage ? <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{errorMessage}</p> : null}
+                  <p className="mt-3 rounded-lg border border-line bg-field px-3 py-2 text-sm text-ink-2">
                     Single workspace mode: this dashboard shows the Telegram session and exchange account configured on this SignalBridge server.
                   </p>
                 </div>
@@ -251,7 +251,7 @@ export default function DashboardPage() {
 
               <div className="simple-panel">
                 <PanelTitle icon={<Activity className="h-5 w-5" />} title="Today" right="Live status" />
-                <div className="grid gap-px bg-white/10">
+                <div className="grid gap-px bg-line">
                   <SimpleRow label="Trades" value={String(status?.bot.trades_last_24h ?? 0)} />
                   <SimpleRow label="Bot" value={status?.bot.state ?? "offline"} />
                   <SimpleRow label="Exchange" value={`${formatExchangeId(status?.config.exchange_id)} ${status?.config.exchange_mode ?? ""}`} />
@@ -265,7 +265,7 @@ export default function DashboardPage() {
             <section className="grid gap-4 lg:grid-cols-2">
               <div className="simple-panel">
                 <PanelTitle icon={<Terminal className="h-5 w-5" />} title="Recent activity" right={`${recentLogs.length} items`} />
-                <div className="divide-y divide-white/10">
+                <div className="divide-y divide-line">
                   {recentLogs.map((entry) => (
                     <LogLine key={entry.id} entry={entry} />
                   ))}
@@ -274,8 +274,8 @@ export default function DashboardPage() {
 
               <div className="simple-panel">
                 <PanelTitle icon={<KeyRound className="h-5 w-5" />} title="Exchange account" right={exchangeState ? "Connected" : "Not loaded"} />
-                {exchangeError ? <p className="border-b border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">Exchange data unavailable: {exchangeError}</p> : null}
-                <div className="grid gap-px bg-white/10">
+                {exchangeError ? <p className="border-b border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">Exchange data unavailable: {exchangeError}</p> : null}
+                <div className="grid gap-px bg-line">
                   <SimpleRow label="Open positions" value={String(exchangeState?.total_open_positions ?? 0)} />
                   <SimpleRow label="Open orders" value={String(exchangeState?.total_open_orders ?? 0)} />
                   <SimpleRow label="Live PnL" value={formatMoney(livePnl)} tone={pnlTone(livePnl)} />
@@ -292,7 +292,7 @@ export default function DashboardPage() {
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[720px] border-collapse text-left">
                     <thead>
-                      <tr className="border-b border-white/10 bg-[#11131a] text-xs uppercase text-zinc-500">
+                      <tr className="border-b border-line bg-field text-xs uppercase text-ink-3">
                         <th className="px-4 py-3 font-semibold">Symbol</th>
                         <th className="px-4 py-3 font-semibold">Side</th>
                         <th className="px-4 py-3 font-semibold">Size</th>
@@ -302,14 +302,14 @@ export default function DashboardPage() {
                         <th className="px-4 py-3 text-right font-semibold">Realized PnL</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-white/10">
+                    <tbody className="divide-y divide-line">
                       {openPositions.map((position) => (
-                        <tr key={`${position.symbol}-${position.side}`} className="bg-[#11131a]">
-                          <td className="mono-num px-4 py-3 text-sm font-semibold text-zinc-100">{position.symbol}</td>
-                          <td className={`px-4 py-3 text-sm font-bold uppercase ${position.side === "buy" ? "text-emerald-signal" : "text-red-300"}`}>{position.side}</td>
-                          <td className="mono-num px-4 py-3 text-sm text-zinc-200">{displayNumber(position.contracts)}</td>
-                          <td className="mono-num px-4 py-3 text-sm text-zinc-200">{displayNumber(position.entry_price)}</td>
-                          <td className="mono-num px-4 py-3 text-sm text-zinc-200">{displayNumber(position.mark_price)}</td>
+                        <tr key={`${position.symbol}-${position.side}`} className="bg-field">
+                          <td className="mono-num px-4 py-3 text-sm font-semibold text-ink-1">{position.symbol}</td>
+                          <td className={`px-4 py-3 text-sm font-bold uppercase ${position.side === "buy" ? "text-buy" : "text-sell"}`}>{position.side}</td>
+                          <td className="mono-num px-4 py-3 text-sm text-ink-1">{displayNumber(position.contracts)}</td>
+                          <td className="mono-num px-4 py-3 text-sm text-ink-1">{displayNumber(position.entry_price)}</td>
+                          <td className="mono-num px-4 py-3 text-sm text-ink-1">{displayNumber(position.mark_price)}</td>
                           <td className={`mono-num px-4 py-3 text-right text-sm font-bold ${pnlTextClass(position.unrealized_pnl)}`}>
                             {formatMoney(position.unrealized_pnl)}
                           </td>
@@ -322,7 +322,7 @@ export default function DashboardPage() {
                   </table>
                 </div>
               ) : (
-                <div className="px-4 py-8 text-center text-sm text-zinc-500">No open positions yet.</div>
+                <div className="px-4 py-8 text-center text-sm text-ink-3">No open positions yet.</div>
               )}
             </section>
           </div>
@@ -340,14 +340,19 @@ function AppSidebar({ active }: { active: string }) {
 
   return (
     <aside className="simple-sidebar">
-      <div className="mb-8 flex items-center gap-3">
-        <div className="simple-brand-mark">
-          <Cable className="h-5 w-5" />
+      <div className="mb-8 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="simple-brand-mark">
+            <Cable className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-display font-semibold text-ink-1">SignalBridge</div>
+            <div className="text-xs text-ink-3">My trading bot</div>
+          </div>
         </div>
-        <div>
-          <div className="font-semibold text-zinc-50">SignalBridge</div>
-          <div className="text-xs text-zinc-500">My trading bot</div>
-        </div>
+        <svg className="signal-pulse-line h-4 w-9" viewBox="0 0 60 20" fill="none" aria-hidden="true">
+          <path d="M0 10 H16 L21 3 L27 17 L32 10 H60" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        </svg>
       </div>
       <nav className="space-y-2">
         {links.map((link) => (
@@ -363,26 +368,26 @@ function AppSidebar({ active }: { active: string }) {
 
 function PanelTitle({ icon, title, right }: { icon: ReactNode; title: string; right: string }) {
   return (
-    <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-      <div className="flex items-center gap-2 font-semibold text-zinc-100">
+    <div className="flex items-center justify-between border-b border-line px-4 py-3">
+      <div className="flex items-center gap-2 font-display font-semibold text-ink-1">
         {icon}
         {title}
       </div>
-      <span className="text-sm text-zinc-500">{right}</span>
+      <span className="text-sm text-ink-3">{right}</span>
     </div>
   );
 }
 
 function ChecklistItem({ label, ready, detail }: { label: string; ready: boolean; detail: string }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-black/20 p-4">
+    <div className="rounded-lg border border-line bg-field p-4">
       <div className="flex items-start gap-3">
-        <div className={`mt-1 flex h-6 w-6 items-center justify-center rounded-full ${ready ? "bg-emerald-signal text-emerald-dim" : "bg-zinc-800 text-zinc-400"}`}>
+        <div className={`mt-1 flex h-6 w-6 items-center justify-center rounded-full ${ready ? "bg-accent text-accent-ink" : "bg-panel-2 text-ink-2"}`}>
           {ready ? <ShieldCheck className="h-4 w-4" /> : <TriangleAlert className="h-4 w-4" />}
         </div>
         <div>
-          <div className="font-semibold text-zinc-100">{label}</div>
-          <div className="mt-1 text-sm text-zinc-500">{detail}</div>
+          <div className="font-display font-semibold text-ink-1">{label}</div>
+          <div className="mt-1 text-sm text-ink-3">{detail}</div>
         </div>
       </div>
     </div>
@@ -391,15 +396,15 @@ function ChecklistItem({ label, ready, detail }: { label: string; ready: boolean
 
 function SimpleRow({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "profit" | "loss" }) {
   const valueClass = {
-    neutral: "text-zinc-100",
-    profit: "text-emerald-signal",
-    loss: "text-red-300"
+    neutral: "text-ink-1",
+    profit: "text-buy",
+    loss: "text-sell"
   }[tone];
 
   return (
-    <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-px bg-white/10">
-      <div className="bg-[#11131a] px-4 py-3 text-sm text-zinc-500">{label}</div>
-      <div className={`mono-num truncate bg-[#11131a] px-4 py-3 text-sm font-semibold uppercase ${valueClass}`}>{value}</div>
+    <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-px bg-line">
+      <div className="bg-field px-4 py-3 text-sm text-ink-3">{label}</div>
+      <div className={`mono-num truncate bg-field px-4 py-3 text-sm font-semibold uppercase ${valueClass}`}>{value}</div>
     </div>
   );
 }
@@ -408,10 +413,10 @@ function LogLine({ entry }: { entry: LogEntry }) {
   const chat = typeof entry.context?.chat === "string" ? entry.context.chat : null;
   return (
     <div className="grid gap-2 px-4 py-3 sm:grid-cols-[130px_90px_100px_minmax(0,1fr)]">
-      <span className="mono-num text-xs text-zinc-500">{formatUtcTimestamp(entry.timestamp)}</span>
+      <span className="mono-num text-xs text-ink-3">{formatUtcTimestamp(entry.timestamp)}</span>
       <span className={`text-xs font-bold uppercase ${levelClass(entry.level)}`}>{entry.level}</span>
-      <span className="text-xs text-zinc-400 truncate">{chat || "-"}</span>
-      <span className="text-sm text-zinc-200">{entry.message}</span>
+      <span className="text-xs text-ink-2 truncate">{chat || "-"}</span>
+      <span className="text-sm text-ink-1">{entry.message}</span>
     </div>
   );
 }
@@ -453,9 +458,9 @@ function pnlTone(value: number | null | undefined): "neutral" | "profit" | "loss
 
 function pnlTextClass(value: number | null | undefined) {
   return {
-    neutral: "text-zinc-100",
-    profit: "text-emerald-signal",
-    loss: "text-red-300"
+    neutral: "text-ink-1",
+    profit: "text-buy",
+    loss: "text-sell"
   }[pnlTone(value)];
 }
 
@@ -478,10 +483,10 @@ function formatExchangeId(value: string | undefined) {
 
 function levelClass(level: LogEntry["level"]) {
   return {
-    debug: "text-zinc-500",
-    info: "text-zinc-300",
-    warning: "text-gold-signal",
-    error: "text-red-400",
-    trade: "text-emerald-signal"
+    debug: "text-ink-3",
+    info: "text-ink-2",
+    warning: "text-warn",
+    error: "text-danger",
+    trade: "text-accent"
   }[level];
 }

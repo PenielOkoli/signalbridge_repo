@@ -373,7 +373,7 @@ export default function SettingsPage() {
           </header>
 
           <form onSubmit={saveConfig} className="simple-page">
-            {errorMessage ? <div className="rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-200">{errorMessage}</div> : null}
+            {errorMessage ? <div className="rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">{errorMessage}</div> : null}
 
             <section className="grid gap-4 lg:grid-cols-4">
               <StepCard number="1" title="Telegram" done={runtime?.telegram.auth_state === "authenticated"} />
@@ -414,40 +414,40 @@ export default function SettingsPage() {
 
             <SimplePanel icon={<RadioTower className="h-5 w-5" />} title="2. Choose signal channels" right={`${config.telegram.monitored_chats.length} selected`}>
               <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-                <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#07080c] px-3">
-                  <Search className="h-4 w-4 text-zinc-500" />
-                  <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search Telegram channels" className="h-11 w-full bg-transparent text-sm text-zinc-100 outline-none placeholder:text-zinc-600" />
+                <div className="flex items-center gap-2 rounded-lg border border-line bg-field px-3">
+                  <Search className="h-4 w-4 text-ink-3" />
+                  <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search Telegram channels" className="h-11 w-full bg-transparent text-sm text-ink-1 outline-none placeholder:text-ink-3" />
                 </div>
                 <button type="button" onClick={() => void loadTelegramChats()} className="simple-secondary-button" disabled={busy !== null || runtime?.telegram.auth_state !== "authenticated"}>
                   Load channels
                 </button>
               </div>
-              <div className="thin-scrollbar mt-4 max-h-80 overflow-auto rounded-xl border border-white/10 bg-black/20">
+              <div className="thin-scrollbar mt-4 max-h-80 overflow-auto rounded-xl border border-line bg-field">
                 {filteredChats.length ? (
-                  <div className="divide-y divide-white/10">
+                  <div className="divide-y divide-line">
                     {filteredChats.map((chat) => {
                       const checked = config.telegram.monitored_chats.includes(chat.source_value);
                       return (
-                        <label key={chat.peer_id} className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-white/[0.035]">
-                          <input type="checkbox" checked={checked} onChange={() => toggleMonitoredChat(chat.source_value)} className="h-5 w-5 accent-emerald-signal" />
+                        <label key={chat.peer_id} className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-hover">
+                          <input type="checkbox" checked={checked} onChange={() => toggleMonitoredChat(chat.source_value)} className="h-5 w-5 accent-accent" />
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate font-semibold text-zinc-100">{chat.title}</span>
-                            <span className="block truncate text-sm text-zinc-500">{chat.username ? `@${chat.username}` : chat.source_value}</span>
+                            <span className="block truncate font-semibold text-ink-1">{chat.title}</span>
+                            <span className="block truncate text-sm text-ink-3">{chat.username ? `@${chat.username}` : chat.source_value}</span>
                           </span>
                         </label>
                       );
                     })}
                   </div>
                 ) : (
-                  <div className="px-4 py-8 text-center text-sm text-zinc-500">No channels loaded.</div>
+                  <div className="px-4 py-8 text-center text-sm text-ink-3">No channels loaded.</div>
                 )}
               </div>
             </SimplePanel>
 
             <section className="grid gap-4 xl:grid-cols-2">
               <SimplePanel icon={<KeyRound className="h-5 w-5" />} title="3. Connect exchange" right={config.exchange.mode}>
-                <div className="mb-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm leading-6 text-zinc-400">
-                  <p className="font-medium text-zinc-200">Before you paste anything here:</p>
+                <div className="mb-3 rounded-xl border border-line bg-field px-4 py-3 text-sm leading-6 text-ink-2">
+                  <p className="font-medium text-ink-1">Before you paste anything here:</p>
                   <p className="mt-1">Create the API key inside your exchange account, give it trading access only, and keep withdrawals disabled.</p>
                 </div>
                 <ExchangeSetupGuide exchangeId={config.exchange.exchange_id} />
@@ -495,14 +495,19 @@ function AppSidebar({ active }: { active: string }) {
 
   return (
     <aside className="simple-sidebar">
-      <div className="mb-8 flex items-center gap-3">
-        <div className="simple-brand-mark">
-          <Cable className="h-5 w-5" />
+      <div className="mb-8 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="simple-brand-mark">
+            <Cable className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-display font-semibold text-ink-1">SignalBridge</div>
+            <div className="text-xs text-ink-3">My trading bot</div>
+          </div>
         </div>
-        <div>
-          <div className="font-semibold text-zinc-50">SignalBridge</div>
-          <div className="text-xs text-zinc-500">My trading bot</div>
-        </div>
+        <svg className="signal-pulse-line h-4 w-9" viewBox="0 0 60 20" fill="none" aria-hidden="true">
+          <path d="M0 10 H16 L21 3 L27 17 L32 10 H60" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        </svg>
       </div>
       <nav className="space-y-2">
         {links.map((link) => (
@@ -517,17 +522,17 @@ function AppSidebar({ active }: { active: string }) {
 }
 
 function StatusBadge({ value }: { value: string }) {
-  return <span className="rounded-full border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-zinc-200">{value}</span>;
+  return <span className="rounded-full border border-line bg-wash px-3 py-2 text-sm font-semibold text-ink-1">{value}</span>;
 }
 
 function StepCard({ number, title, done }: { number: string; title: string; done: boolean }) {
   return (
     <div className="simple-panel p-4">
-      <div className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-bold ${done ? "bg-emerald-signal text-emerald-dim" : "bg-zinc-800 text-zinc-300"}`}>
+      <div className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-bold ${done ? "bg-accent text-accent-ink" : "bg-panel-2 text-ink-2"}`}>
         {done ? <ShieldCheck className="h-5 w-5" /> : number}
       </div>
-      <div className="mt-3 font-semibold text-zinc-100">{title}</div>
-      <div className="mt-1 text-sm text-zinc-500">{done ? "Done" : "Needs setup"}</div>
+      <div className="mt-3 font-display font-semibold text-ink-1">{title}</div>
+      <div className="mt-1 text-sm text-ink-3">{done ? "Done" : "Needs setup"}</div>
     </div>
   );
 }
@@ -535,12 +540,12 @@ function StepCard({ number, title, done }: { number: string; title: string; done
 function SimplePanel({ icon, title, right, children }: { icon: ReactNode; title: string; right: string; children: ReactNode }) {
   return (
     <section className="simple-panel">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-        <div className="flex items-center gap-2 font-semibold text-zinc-100">
+      <div className="flex items-center justify-between border-b border-line px-4 py-3">
+        <div className="flex items-center gap-2 font-display font-semibold text-ink-1">
           {icon}
           {title}
         </div>
-        <span className="text-sm text-zinc-500">{right}</span>
+        <span className="text-sm text-ink-3">{right}</span>
       </div>
       <div className="p-4">{children}</div>
     </section>
@@ -549,9 +554,9 @@ function SimplePanel({ icon, title, right, children }: { icon: ReactNode; title:
 
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
-      <div className="text-xs text-zinc-500">{label}</div>
-      <div className="mono-num mt-1 text-sm text-zinc-200">{value}</div>
+    <div className="rounded-lg border border-line bg-field px-3 py-2">
+      <div className="text-xs text-ink-3">{label}</div>
+      <div className="mono-num mt-1 text-sm text-ink-1">{value}</div>
     </div>
   );
 }
@@ -560,21 +565,21 @@ function ExchangeSetupGuide({ exchangeId }: { exchangeId: ExchangeId }) {
   const guide = EXCHANGE_SETUP_GUIDES[exchangeId];
 
   return (
-    <div className="mb-4 rounded-xl border border-emerald-signal/20 bg-emerald-signal/5 p-4">
-      <div className="text-sm font-semibold text-emerald-200">{guide.title}</div>
-      <div className="mt-1 text-xs uppercase tracking-[0.18em] text-emerald-300/70">Recommended sequence</div>
-      <ol className="mt-2 space-y-2 text-sm leading-6 text-zinc-300">
+    <div className="mb-4 rounded-xl border border-accent/20 bg-accent/5 p-4">
+      <div className="text-sm font-semibold text-accent">{guide.title}</div>
+      <div className="mt-1 text-xs uppercase tracking-[0.18em] text-accent/70">Recommended sequence</div>
+      <ol className="mt-2 space-y-2 text-sm leading-6 text-ink-2">
         {guide.steps.map((step, index) => (
           <li key={step} className="flex gap-2">
-            <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-signal/20 text-xs font-semibold text-emerald-100">{index + 1}</span>
+            <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/20 text-xs font-semibold text-accent">{index + 1}</span>
             <span>{step}</span>
           </li>
         ))}
       </ol>
-      <div className="mt-3 rounded-lg border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-xs leading-5 text-emerald-100">
+      <div className="mt-3 rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-xs leading-5 text-accent">
         {guide.safety}
       </div>
-      <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs leading-5 text-zinc-400">
+      <div className="mt-3 rounded-lg border border-line bg-field px-3 py-2 text-xs leading-5 text-ink-2">
         {guide.passphrase}
       </div>
     </div>
@@ -584,9 +589,9 @@ function ExchangeSetupGuide({ exchangeId }: { exchangeId: ExchangeId }) {
 function Field({ label, value, onChange, type = "text", placeholder = "", helper = "" }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string; helper?: string }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-sm font-medium text-zinc-300">{label}</span>
+      <span className="mb-1 block text-sm font-medium text-ink-2">{label}</span>
       <input value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="input-field h-11 text-sm" />
-      {helper ? <span className="mt-1 block text-xs leading-5 text-zinc-500">{helper}</span> : null}
+      {helper ? <span className="mt-1 block text-xs leading-5 text-ink-3">{helper}</span> : null}
     </label>
   );
 }
@@ -594,7 +599,7 @@ function Field({ label, value, onChange, type = "text", placeholder = "", helper
 function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: Array<{ label: string; value: string }> }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-sm font-medium text-zinc-300">{label}</span>
+      <span className="mb-1 block text-sm font-medium text-ink-2">{label}</span>
       <select value={value} onChange={(event) => onChange(event.target.value)} className="input-field h-11 text-sm">
         {options.map((option) => (
           <option key={option.value} value={option.value}>
