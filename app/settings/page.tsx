@@ -14,6 +14,7 @@ import {
   Unlock
 } from "../components/icons";
 import Link from "next/link";
+import { ChevronDown } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -184,6 +185,7 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("Not connected");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
 
   const hydrate = useCallback(async (connectionOverride: BridgeConnection = connection) => {
     setBusy("load");
@@ -196,6 +198,17 @@ export default function SettingsPage() {
       setRuntime(statusResponse);
       setStatusText(statusResponse.config.ready_for_trading ? "Ready" : "Setup needed");
       setErrorMessage(null);
+      setOpenSections((current) => {
+        if (Object.keys(current).length > 0) return current;
+        const telegramReady = statusResponse.telegram.auth_state === "authenticated";
+        const channelsReady = configResponse.telegram.monitored_chats.length > 0;
+        const exchangeReady = Boolean(configResponse.exchange.api_key_set && configResponse.exchange.api_secret_set);
+        const riskReady =
+          (configResponse.risk.risk_mode === "fixed_usdt" ? configResponse.risk.fixed_usdt_risk > 0 : configResponse.risk.balance_risk_percent > 0) &&
+          configResponse.risk.max_leverage > 0;
+        const firstIncomplete = !telegramReady ? "telegram" : !channelsReady ? "channels" : !exchangeReady ? "exchange" : !riskReady ? "risk" : null;
+        return firstIncomplete ? { [firstIncomplete]: true } : current;
+      });
     } catch (error) {
       setStatusText("Offline");
       setErrorMessage(error instanceof Error ? error.message : "Unable to reach SignalBridge.");
@@ -351,6 +364,27 @@ export default function SettingsPage() {
     return [chat.title, chat.username ?? "", chat.source_value, chat.kind].some((value) => value.toLowerCase().includes(needle));
   });
 
+  function toggleSection(id: string) {
+    setOpenSections((current) => ({ ...current, [id]: !current[id] }));
+  }
+
+  const telegramDone = runtime?.telegram.auth_state === "authenticated";
+  const channelsDone = config.telegram.monitored_chats.length > 0;
+  const exchangeDone = Boolean(config.exchange.api_key_set && config.exchange.api_secret_set);
+  const riskDone =
+    (config.risk.risk_mode === "fixed_usdt" ? config.risk.fixed_usdt_risk > 0 : config.risk.balance_risk_percent > 0) &&
+    config.risk.max_leverage > 0;
+
+  const telegramSummary = telegramDone ? `${config.telegram.phone_number} \u00b7 authenticated` : "Not connected yet";
+  const channelsSummary = channelsDone
+    ? `${config.telegram.monitored_chats.length} channel${config.telegram.monitored_chats.length === 1 ? "" : "s"} selected`
+    : "No channels selected yet";
+  const exchangeName = EXCHANGE_OPTIONS.find((option) => option.value === config.exchange.exchange_id)?.label ?? config.exchange.exchange_id;
+  const exchangeSummary = exchangeDone ? `${exchangeName} \u00b7 ${config.exchange.mode}` : "API keys not saved yet";
+  const riskSummary = riskDone
+    ? `${config.risk.risk_mode === "fixed_usdt" ? `$${config.risk.fixed_usdt_risk} per trade` : `${config.risk.balance_risk_percent}% per trade`} \u00b7 ${config.risk.max_leverage}x max`
+    : "Not configured yet";
+
   return (
     <main className="app-shell">
       <div className="simple-app-frame">
@@ -375,77 +409,87 @@ export default function SettingsPage() {
           <form onSubmit={saveConfig} className="simple-page">
             {errorMessage ? <div className="rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">{errorMessage}</div> : null}
 
-            <section className="grid gap-4 lg:grid-cols-4">
-              <StepCard number="1" title="Telegram" done={runtime?.telegram.auth_state === "authenticated"} />
-              <StepCard number="2" title="Channels" done={config.telegram.monitored_chats.length > 0} />
-              <StepCard number="3" title="Exchange key" done={Boolean(config.exchange.api_key_set && config.exchange.api_secret_set)} />
-              <StepCard
-                number="4"
-                title="Risk"
-                done={
-                  (config.risk.risk_mode === "fixed_usdt" ? config.risk.fixed_usdt_risk > 0 : config.risk.balance_risk_percent > 0) &&
-                  config.risk.max_leverage > 0
-                }
-              />
-            </section>
-
-            <SimplePanel icon={<RadioTower className="h-5 w-5" />} title="1. Connect Telegram" right={(runtime?.telegram.auth_state ?? "unknown").replace("_", " ")}>
-              <div className="grid gap-3 md:grid-cols-2">
-                <Field label="Phone number" value={config.telegram.phone_number} onChange={(value) => setConfig({ ...config, telegram: { ...config.telegram, phone_number: value } })} placeholder="+15551234567" />
-                <InfoRow label="Last code" value={formatUtcTimestamp(runtime?.telegram.code_sent_at ?? null)} />
-                <Field label="SMS code" value={telegramCode} onChange={setTelegramCode} placeholder="Code from Telegram" />
-                <Field label="2FA password" type="password" value={telegramPassword} onChange={setTelegramPassword} placeholder="Only if Telegram asks" />
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button type="button" onClick={requestCode} className="simple-secondary-button" disabled={busy !== null || runtime?.telegram.auth_state === "code_sent" || runtime?.telegram.auth_state === "password_required" || runtime?.telegram.auth_state === "authenticated"}>
-                  <Unlock className="h-4 w-4" />
-                  {runtime?.telegram.auth_state === "code_sent" || runtime?.telegram.auth_state === "password_required" ? "Code sent" : "Request code"}
-                </button>
-                <button type="button" onClick={verifyCode} className="simple-primary-button" disabled={busy !== null || !telegramCode || runtime?.telegram.auth_state === "authenticated"}>
-                  <ShieldCheck className="h-4 w-4" />
-                  Verify code
-                </button>
-                <button type="button" onClick={logoutTelegram} className="simple-secondary-button" disabled={busy !== null}>
-                  <LogOut className="h-4 w-4" />
-                  Log out
-                </button>
-              </div>
-            </SimplePanel>
-
-            <SimplePanel icon={<RadioTower className="h-5 w-5" />} title="2. Choose signal channels" right={`${config.telegram.monitored_chats.length} selected`}>
-              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-                <div className="flex items-center gap-2 rounded-lg border border-line bg-field px-3">
-                  <Search className="h-4 w-4 text-ink-3" />
-                  <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search Telegram channels" className="h-11 w-full bg-transparent text-sm text-ink-1 outline-none placeholder:text-ink-3" />
+            <div className="simple-panel">
+              <AccordionItem
+                id="telegram"
+                icon={<RadioTower className="h-4 w-4" />}
+                title="Telegram"
+                done={telegramDone}
+                summary={telegramSummary}
+                open={Boolean(openSections.telegram)}
+                onToggle={toggleSection}
+              >
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Field label="Phone number" value={config.telegram.phone_number} onChange={(value) => setConfig({ ...config, telegram: { ...config.telegram, phone_number: value } })} placeholder="+15551234567" />
+                  <InfoRow label="Last code" value={formatUtcTimestamp(runtime?.telegram.code_sent_at ?? null)} />
+                  <Field label="SMS code" value={telegramCode} onChange={setTelegramCode} placeholder="Code from Telegram" />
+                  <Field label="2FA password" type="password" value={telegramPassword} onChange={setTelegramPassword} placeholder="Only if Telegram asks" />
                 </div>
-                <button type="button" onClick={() => void loadTelegramChats()} className="simple-secondary-button" disabled={busy !== null || runtime?.telegram.auth_state !== "authenticated"}>
-                  Load channels
-                </button>
-              </div>
-              <div className="thin-scrollbar mt-4 max-h-80 overflow-auto rounded-xl border border-line bg-field">
-                {filteredChats.length ? (
-                  <div className="divide-y divide-line">
-                    {filteredChats.map((chat) => {
-                      const checked = config.telegram.monitored_chats.includes(chat.source_value);
-                      return (
-                        <label key={chat.peer_id} className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-hover">
-                          <input type="checkbox" checked={checked} onChange={() => toggleMonitoredChat(chat.source_value)} className="h-5 w-5 accent-accent" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate font-semibold text-ink-1">{chat.title}</span>
-                            <span className="block truncate text-sm text-ink-3">{chat.username ? `@${chat.username}` : chat.source_value}</span>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-4 py-8 text-center text-sm text-ink-3">No channels loaded.</div>
-                )}
-              </div>
-            </SimplePanel>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button type="button" onClick={requestCode} className="simple-secondary-button" disabled={busy !== null || runtime?.telegram.auth_state === "code_sent" || runtime?.telegram.auth_state === "password_required" || runtime?.telegram.auth_state === "authenticated"}>
+                    <Unlock className="h-4 w-4" />
+                    {runtime?.telegram.auth_state === "code_sent" || runtime?.telegram.auth_state === "password_required" ? "Code sent" : "Request code"}
+                  </button>
+                  <button type="button" onClick={verifyCode} className="simple-primary-button" disabled={busy !== null || !telegramCode || runtime?.telegram.auth_state === "authenticated"}>
+                    <ShieldCheck className="h-4 w-4" />
+                    Verify code
+                  </button>
+                  <button type="button" onClick={logoutTelegram} className="simple-secondary-button" disabled={busy !== null}>
+                    <LogOut className="h-4 w-4" />
+                    Log out
+                  </button>
+                </div>
+              </AccordionItem>
 
-            <section className="grid gap-4 xl:grid-cols-2">
-              <SimplePanel icon={<KeyRound className="h-5 w-5" />} title="3. Connect exchange" right={config.exchange.mode}>
+              <AccordionItem
+                id="channels"
+                icon={<RadioTower className="h-4 w-4" />}
+                title="Signal channels"
+                done={channelsDone}
+                summary={channelsSummary}
+                open={Boolean(openSections.channels)}
+                onToggle={toggleSection}
+              >
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+                  <div className="flex items-center gap-2 rounded-lg border border-line bg-field px-3">
+                    <Search className="h-4 w-4 text-ink-3" />
+                    <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search Telegram channels" className="h-11 w-full bg-transparent text-sm text-ink-1 outline-none placeholder:text-ink-3" />
+                  </div>
+                  <button type="button" onClick={() => void loadTelegramChats()} className="simple-secondary-button" disabled={busy !== null || runtime?.telegram.auth_state !== "authenticated"}>
+                    Load channels
+                  </button>
+                </div>
+                <div className="thin-scrollbar mt-4 max-h-80 overflow-auto rounded-xl border border-line bg-field">
+                  {filteredChats.length ? (
+                    <div className="divide-y divide-line">
+                      {filteredChats.map((chat) => {
+                        const checked = config.telegram.monitored_chats.includes(chat.source_value);
+                        return (
+                          <label key={chat.peer_id} className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-hover">
+                            <input type="checkbox" checked={checked} onChange={() => toggleMonitoredChat(chat.source_value)} className="h-5 w-5 accent-accent" />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-semibold text-ink-1">{chat.title}</span>
+                              <span className="block truncate text-sm text-ink-3">{chat.username ? `@${chat.username}` : chat.source_value}</span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="px-4 py-8 text-center text-sm text-ink-3">No channels loaded.</div>
+                  )}
+                </div>
+              </AccordionItem>
+
+              <AccordionItem
+                id="exchange"
+                icon={<KeyRound className="h-4 w-4" />}
+                title="Exchange"
+                done={exchangeDone}
+                summary={exchangeSummary}
+                open={Boolean(openSections.exchange)}
+                onToggle={toggleSection}
+              >
                 <div className="mb-3 rounded-xl border border-line bg-field px-4 py-3 text-sm leading-6 text-ink-2">
                   <p className="font-medium text-ink-1">Before you paste anything here:</p>
                   <p className="mt-1">Create the API key inside your exchange account, give it trading access only, and keep withdrawals disabled.</p>
@@ -459,9 +503,17 @@ export default function SettingsPage() {
                   <Field label={`Passphrase ${config.exchange.api_password_set ? "(already saved)" : ""}`} type="password" value={secrets.exchangeApiPassword} onChange={(value) => setSecrets({ ...secrets, exchangeApiPassword: value })} placeholder="Only needed by some exchanges" helper="Leave blank unless your exchange explicitly gives you a passphrase." />
                   <Field label="Default leverage" value={String(config.exchange.default_leverage)} onChange={(value) => setConfig({ ...config, exchange: { ...config.exchange, default_leverage: Number(value || 0) } })} />
                 </div>
-              </SimplePanel>
+              </AccordionItem>
 
-              <SimplePanel icon={<SlidersHorizontal className="h-5 w-5" />} title="4. Choose risk rules" right={config.risk.risk_mode.replace("_", " ")}>
+              <AccordionItem
+                id="risk"
+                icon={<SlidersHorizontal className="h-4 w-4" />}
+                title="Risk rules"
+                done={riskDone}
+                summary={riskSummary}
+                open={Boolean(openSections.risk)}
+                onToggle={toggleSection}
+              >
                 <div className="grid gap-3 md:grid-cols-2">
                   <Select label="Risk mode" value={config.risk.risk_mode} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, risk_mode: value as "fixed_usdt" | "balance_percent" } })} options={[{ label: "Fixed USDT", value: "fixed_usdt" }, { label: "Balance percent", value: "balance_percent" }]} />
                   <Field label="Max leverage" value={String(config.risk.max_leverage)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, max_leverage: Number(value || 0) } })} />
@@ -471,8 +523,8 @@ export default function SettingsPage() {
                     <Field label="Risk per trade in %" value={String(config.risk.balance_risk_percent)} onChange={(value) => setConfig({ ...config, risk: { ...config.risk, balance_risk_percent: Number(value || 0) } })} />
                   )}
                 </div>
-              </SimplePanel>
-            </section>
+              </AccordionItem>
+            </div>
 
             <div className="sticky bottom-4 z-10 flex justify-end">
               <button type="submit" className="simple-primary-button shadow-terminal" disabled={busy !== null}>
@@ -525,30 +577,39 @@ function StatusBadge({ value }: { value: string }) {
   return <span className="rounded-full border border-line bg-wash px-3 py-2 text-sm font-semibold text-ink-1">{value}</span>;
 }
 
-function StepCard({ number, title, done }: { number: string; title: string; done: boolean }) {
+function AccordionItem({
+  id,
+  icon,
+  title,
+  done,
+  summary,
+  open,
+  onToggle,
+  children
+}: {
+  id: string;
+  icon: ReactNode;
+  title: string;
+  done: boolean;
+  summary: string;
+  open: boolean;
+  onToggle: (id: string) => void;
+  children: ReactNode;
+}) {
   return (
-    <div className="simple-panel p-4">
-      <div className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-bold ${done ? "bg-accent text-accent-ink" : "bg-panel-2 text-ink-2"}`}>
-        {done ? <ShieldCheck className="h-5 w-5" /> : number}
-      </div>
-      <div className="mt-3 font-display font-semibold text-ink-1">{title}</div>
-      <div className="mt-1 text-sm text-ink-3">{done ? "Done" : "Needs setup"}</div>
+    <div className="border-b border-line last:border-b-0">
+      <button type="button" onClick={() => onToggle(id)} className="flex w-full items-center gap-3 px-4 py-4 text-left" aria-expanded={open}>
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${done ? "bg-buy/15 text-buy" : "bg-panel-2 text-ink-2"}`}>
+          {done ? <ShieldCheck className="h-4 w-4" /> : icon}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block font-display font-semibold text-ink-1">{title}</span>
+          <span className="block truncate text-sm text-ink-3">{summary}</span>
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-ink-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open ? <div className="px-4 pb-5">{children}</div> : null}
     </div>
-  );
-}
-
-function SimplePanel({ icon, title, right, children }: { icon: ReactNode; title: string; right: string; children: ReactNode }) {
-  return (
-    <section className="simple-panel">
-      <div className="flex items-center justify-between border-b border-line px-4 py-3">
-        <div className="flex items-center gap-2 font-display font-semibold text-ink-1">
-          {icon}
-          {title}
-        </div>
-        <span className="text-sm text-ink-3">{right}</span>
-      </div>
-      <div className="p-4">{children}</div>
-    </section>
   );
 }
 

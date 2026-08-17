@@ -140,7 +140,8 @@ export default function DashboardPage() {
 
   const recentLogs = useMemo(
     () =>
-      [...logs]
+      logs
+        .filter((entry) => entry.level !== "debug")
         .sort((left, right) => safeTime(right.timestamp) - safeTime(left.timestamp))
         .slice(0, 6),
     [logs]
@@ -250,40 +251,33 @@ export default function DashboardPage() {
               </div>
 
               <div className="simple-panel">
-                <PanelTitle icon={<Activity className="h-5 w-5" />} title="Today" right="Live status" />
-                <div className="grid gap-px bg-line">
-                  <SimpleRow label="Trades" value={String(status?.bot.trades_last_24h ?? 0)} />
-                  <SimpleRow label="Bot" value={status?.bot.state ?? "offline"} />
-                  <SimpleRow label="Exchange" value={`${formatExchangeId(status?.config.exchange_id)} ${status?.config.exchange_mode ?? ""}`} />
-                  <SimpleRow label="Live PnL" value={formatMoney(livePnl)} tone={pnlTone(livePnl)} />
-                  <SimpleRow label="Realized PnL" value={formatMoney(realizedPnl)} tone={pnlTone(realizedPnl)} />
-                  <SimpleRow label="Balance" value={displayNumber(exchangeState?.free_usdt)} />
+                <PanelTitle icon={<Activity className="h-5 w-5" />} title="Account overview" right={exchangeState ? "Connected" : "Not loaded"} />
+                {exchangeError ? <p className="border-b border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">Exchange data unavailable: {exchangeError}</p> : null}
+                <div className="grid grid-cols-2 gap-2 p-4">
+                  <StatTile label="Bot" value={status?.bot.state ?? "offline"} />
+                  <StatTile label="Exchange" value={`${formatExchangeId(status?.config.exchange_id)} ${status?.config.exchange_mode ?? ""}`} />
+                  <StatTile label="Trades 24h" value={String(status?.bot.trades_last_24h ?? 0)} />
+                  <StatTile label="Positions" value={String(exchangeState?.total_open_positions ?? 0)} />
+                  <StatTile label="Open orders" value={String(exchangeState?.total_open_orders ?? 0)} />
+                  <StatTile label="Free USDT" value={displayNumber(exchangeState?.free_usdt)} />
+                  <StatTile label="Total USDT" value={displayNumber(exchangeState?.total_usdt)} />
+                  <StatTile label="Live PnL" value={formatMoney(livePnl)} tone={pnlTone(livePnl)} />
+                  <StatTile label="Realized PnL" value={formatMoney(realizedPnl)} tone={pnlTone(realizedPnl)} />
                 </div>
               </div>
             </section>
 
-            <section className="grid gap-4 lg:grid-cols-2">
-              <div className="simple-panel">
-                <PanelTitle icon={<Terminal className="h-5 w-5" />} title="Recent activity" right={`${recentLogs.length} items`} />
+            <section className="simple-panel">
+              <PanelTitle icon={<Terminal className="h-5 w-5" />} title="Recent activity" right={`${recentLogs.length} items`} />
+              {recentLogs.length ? (
                 <div className="divide-y divide-line">
                   {recentLogs.map((entry) => (
-                    <LogLine key={entry.id} entry={entry} />
+                    <ActivityItem key={entry.id} entry={entry} />
                   ))}
                 </div>
-              </div>
-
-              <div className="simple-panel">
-                <PanelTitle icon={<KeyRound className="h-5 w-5" />} title="Exchange account" right={exchangeState ? "Connected" : "Not loaded"} />
-                {exchangeError ? <p className="border-b border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">Exchange data unavailable: {exchangeError}</p> : null}
-                <div className="grid gap-px bg-line">
-                  <SimpleRow label="Open positions" value={String(exchangeState?.total_open_positions ?? 0)} />
-                  <SimpleRow label="Open orders" value={String(exchangeState?.total_open_orders ?? 0)} />
-                  <SimpleRow label="Live PnL" value={formatMoney(livePnl)} tone={pnlTone(livePnl)} />
-                  <SimpleRow label="Realized PnL" value={formatMoney(realizedPnl)} tone={pnlTone(realizedPnl)} />
-                  <SimpleRow label="Free USDT" value={displayNumber(exchangeState?.free_usdt)} />
-                  <SimpleRow label="Total USDT" value={displayNumber(exchangeState?.total_usdt)} />
-                </div>
-              </div>
+              ) : (
+                <div className="px-4 py-8 text-center text-sm text-ink-3">No activity yet.</div>
+              )}
             </section>
 
             <section className="simple-panel">
@@ -394,7 +388,7 @@ function ChecklistItem({ label, ready, detail }: { label: string; ready: boolean
   );
 }
 
-function SimpleRow({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "profit" | "loss" }) {
+function StatTile({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "profit" | "loss" }) {
   const valueClass = {
     neutral: "text-ink-1",
     profit: "text-buy",
@@ -402,21 +396,41 @@ function SimpleRow({ label, value, tone = "neutral" }: { label: string; value: s
   }[tone];
 
   return (
-    <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-px bg-line">
-      <div className="bg-field px-4 py-3 text-sm text-ink-3">{label}</div>
-      <div className={`mono-num truncate bg-field px-4 py-3 text-sm font-semibold uppercase ${valueClass}`}>{value}</div>
+    <div className="rounded-lg border border-line bg-field p-3">
+      <div className="text-xs text-ink-3">{label}</div>
+      <div className={`mono-num mt-1 truncate text-base font-semibold uppercase ${valueClass}`}>{value}</div>
     </div>
   );
 }
 
-function LogLine({ entry }: { entry: LogEntry }) {
+function levelMeta(level: LogEntry["level"]) {
+  switch (level) {
+    case "trade":
+      return { Icon: ShieldCheck, badgeClass: "bg-buy/15 text-buy" };
+    case "error":
+      return { Icon: TriangleAlert, badgeClass: "bg-danger/15 text-danger" };
+    case "warning":
+      return { Icon: TriangleAlert, badgeClass: "bg-warn/15 text-warn" };
+    default:
+      return { Icon: Activity, badgeClass: "bg-panel-2 text-ink-2" };
+  }
+}
+
+function ActivityItem({ entry }: { entry: LogEntry }) {
   const chat = typeof entry.context?.chat === "string" ? entry.context.chat : null;
+  const { Icon, badgeClass } = levelMeta(entry.level);
   return (
-    <div className="grid gap-2 px-4 py-3 sm:grid-cols-[130px_90px_100px_minmax(0,1fr)]">
-      <span className="mono-num text-xs text-ink-3">{formatUtcTimestamp(entry.timestamp)}</span>
-      <span className={`text-xs font-bold uppercase ${levelClass(entry.level)}`}>{entry.level}</span>
-      <span className="text-xs text-ink-2 truncate">{chat || "-"}</span>
-      <span className="text-sm text-ink-1">{entry.message}</span>
+    <div className="flex items-start gap-3 px-4 py-3">
+      <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${badgeClass}`}>
+        <Icon className="h-3.5 w-3.5" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm text-ink-1">{entry.message}</p>
+        <p className="mt-0.5 text-xs text-ink-3">
+          {chat ? `${chat} \u00b7 ` : ""}
+          {formatUtcTimestamp(entry.timestamp)}
+        </p>
+      </div>
     </div>
   );
 }
@@ -479,14 +493,4 @@ function formatExchangeId(value: string | undefined) {
       coinex: "CoinEx"
     }[value ?? ""] ?? "-"
   );
-}
-
-function levelClass(level: LogEntry["level"]) {
-  return {
-    debug: "text-ink-3",
-    info: "text-ink-2",
-    warning: "text-warn",
-    error: "text-danger",
-    trade: "text-accent"
-  }[level];
 }
