@@ -1206,7 +1206,7 @@ class BotSupervisor:
         api_hash = self.config_manager.resolve_telegram_api_hash(config)
         if not api_id or not api_hash:
             raise RuntimeConfigurationError("Telegram app credentials are not configured on the server")
-        return TelegramClient(self.config_manager.resolve_telegram_session_name(config), api_id, api_hash)
+        return TelegramClient(str(self._session_file_path(config).with_suffix("")), api_id, api_hash)
 
     @staticmethod
     def _normalized_monitored_chat_refs(chat_refs: list[str]) -> list[int | str]:
@@ -1230,7 +1230,8 @@ class BotSupervisor:
             await pending.client.disconnect()
 
     def _session_file_path(self, config: AppConfig) -> Path:
-        return Path(f"{self.config_manager.resolve_telegram_session_name(config)}.session")
+        session_dir = self.config_manager.config_path.parent
+        return session_dir / f"{self.config_manager.resolve_telegram_session_name(config)}.session"
 
     def _session_related_paths(self, config: AppConfig) -> list[Path]:
         base = self._session_file_path(config)
