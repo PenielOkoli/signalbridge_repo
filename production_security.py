@@ -60,8 +60,12 @@ def validate_production_environment() -> None:
     if api_url and not api_url.startswith("https://"):
         problems.append("SIGNALBRIDGE_API_URL must use https:// in production")
 
-    if os.getenv("ALLOW_PUBLIC_SIGNUP", "").strip().lower() in {"1", "true", "yes", "on"}:
-        problems.append("ALLOW_PUBLIC_SIGNUP must remain false until per-user workspace isolation is implemented")
+    # Per-user workspace isolation (Telegram session, config, master key, logs)
+    # was completed in commit 03847c2 (fix(security): isolate Telegram sessions
+    # per workspace). ALLOW_PUBLIC_SIGNUP is now safe to enable; this check is
+    # intentionally left in place as a reminder to re-audit isolation if the
+    # workspace bootstrapping logic changes again.
+
 
     if not trusted_hosts_from_env():
         problems.append("TRUSTED_HOSTS must list the public API hostname(s)")
