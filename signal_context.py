@@ -169,6 +169,35 @@ class SignalRegistry:
 
         return None
 
+    def find_duplicate_open(self, chat_key: str, parsed: ParsedSignal) -> TrackedSignal | None:
+        """Detect a verbatim repost of an already-active signal -- same symbol,
+        side, entry, stop loss, and take-profit targets -- so a duplicate post
+        doesn't open a second position or a second pending order for a setup
+        that's already live. Deliberately strict (every field must match) so a
+        genuinely new signal on the same symbol is never mistaken for a repost.
+        """
+
+        if parsed.symbol is None or parsed.side is None:
+            return None
+
+        for signal in self._sorted_signals(chat_key):
+            if not signal.is_active:
+                continue
+            existing = signal.signal
+            if existing.symbol != parsed.symbol or existing.side != parsed.side:
+                continue
+            if existing.entry_type != parsed.entry_type:
+                continue
+            if not _values_match(existing.entry_price, parsed.entry_price):
+                continue
+            if not _values_match(existing.stop_loss, parsed.stop_loss):
+                continue
+            if not _target_lists_match(existing.take_profit_targets, parsed.take_profit_targets):
+                continue
+            return signal
+
+        return None
+
     def record_execution(
         self,
         *,
@@ -287,6 +316,18 @@ def _lifecycle_after_execution(
             return "pending_entry"
         return "executed"
     return previous
+
+def _values_match(left: float | None, right: float | None, relative_tolerance: float = 1e-6) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    scale = max(abs(left), abs(right), 1e-12)
+    return abs(left - right) <= scale * relative_tolerance
+
+
+def _target_lists_match(left: list[float], right: list[float]) -> bool:
+    if len(left) != len(right):
+        return False
+    return all(_values_match(item_left, item_right) for item_left, item_right in zip(left, right))
 
 
 def _excerpt(text: str, limit: int = 180) -> str:

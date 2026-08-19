@@ -710,6 +710,33 @@ class BotSupervisor:
             message_id=envelope.message_id,
             reply_to_message_id=envelope.reply_to_message_id,
         )
+
+        if tracked_signal is None and (parsed.action == SignalAction.OPEN or parsed.action == "open"):
+            duplicate = self._signal_registry.find_duplicate_open(envelope.chat_key, parsed)
+            if duplicate is not None:
+                self.log_store.append(
+                    "trade",
+                    "duplicate signal ignored; an identical setup is already active",
+                    chat=envelope.chat_name,
+                    event_type=envelope.event_type,
+                    message_id=envelope.message_id,
+                    symbol=parsed.symbol,
+                    side=parsed.side,
+                    tracked_signal_key=duplicate.key,
+                )
+                self._signal_registry.attach_reference_message(
+                    tracked_signal=duplicate,
+                    chat_key=envelope.chat_key,
+                    chat_name=envelope.chat_name,
+                    message_id=envelope.message_id,
+                    raw_message=envelope.raw_text,
+                )
+                await self._notify_signal_skipped(
+                    envelope, "identical to an already-active signal for this symbol; ignored to avoid a duplicate position"
+                )
+                return
+
+
         executable_signal, execution_mode, tracked_signal, replacement_cancel_symbol = await self._resolve_executable_signal(
             trader,
             parsed,
