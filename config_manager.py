@@ -241,6 +241,7 @@ class AppConfig(SecretModel):
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    bot_should_run: bool = Field(default=False)
 
 
 class RuntimeSecrets(SecretModel):

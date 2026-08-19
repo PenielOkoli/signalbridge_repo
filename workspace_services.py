@@ -64,5 +64,34 @@ class WorkspaceServiceRegistry:
         for service in services:
             await service.runtime.shutdown()
 
+    async def resume_all(self) -> None:
+        """Re-start every workspace's bot that was actively running when the
+        process last stopped. Meant to be run as a background task right
+        after startup so it never blocks the API from accepting requests --
+        one workspace's stale credentials or a slow Telegram reconnect
+        shouldn't hold up every other workspace, or the server itself.
+        """
+        if not self.workspace_root.exists():
+            return
+        workspace_ids = sorted(
+            entry.name
+            for entry in self.workspace_root.iterdir()
+            if entry.is_dir() and (entry / "config.json").exists()
+        )
+        for workspace_id in workspace_ids:
+            try:
+                services = await self.get(workspace_id)
+                await services.runtime.resume_if_should_run()
+            except Exception as exc:
+                services = self._services.get(workspace_id)
+                if services is not None:
+                    services.log_store.append(
+                        "warning",
+                        "resume-on-startup failed for this workspace",
+                        error=exc.__class__.__name__,
+                        detail=str(exc)[:240],
+                    )
+            await asyncio.sleep(0.75)
+
     def workspace_count(self) -> int:
         return len(self._services)

@@ -240,6 +240,9 @@ class BotSupervisor:
                 monitored_chat_count=len(config.telegram.monitored_chats),
                 session_name=self.config_manager.resolve_telegram_session_name(config),
             )
+            if not config.bot_should_run:
+                config.bot_should_run = True
+                self.config_manager.save_config(config)
             return await self.get_status()
 
     async def stop_bot(self) -> dict[str, Any]:
@@ -248,6 +251,7 @@ class BotSupervisor:
         async with self._lock:
             if self._bot_state in {"stopped", "error"} and self._bot_task is None:
                 self._bot_state = "stopped"
+                self._clear_should_run_flag()
                 return await self.get_status()
 
             self._bot_state = "stopping"
@@ -269,7 +273,42 @@ class BotSupervisor:
             self._bot_state = "stopped"
             self._started_at = None
             self.log_store.append("info", "trading worker stopped")
+            self._clear_should_run_flag()
             return await self.get_status()
+        
+        def _clear_should_run_flag(self) -> None:
+        try:
+            config = self.config_manager.load_config()
+        except Exception:
+            return
+        if config.bot_should_run:
+            config.bot_should_run = False
+            self.config_manager.save_config(config)
+
+    async def resume_if_should_run(self) -> None:
+        """Called once on process startup per workspace. Re-starts the bot
+        only if it was actively running (not just configured) when the
+        process last stopped, so a restart doesn't silently leave every
+        user's bot offline until they notice and click Start again -- and
+        doesn't start bots for users who explicitly stopped theirs.
+        """
+        try:
+            config = self._load_or_initialize_config()
+        except Exception as exc:
+            self.log_store.append("warning", "resume-on-startup skipped: config unavailable", detail=str(exc)[:240])
+            return
+        if not config.bot_should_run:
+            return
+        try:
+            await self.start_bot()
+            self.log_store.append("info", "trading worker resumed automatically after restart")
+        except Exception as exc:
+            self.log_store.append(
+                "warning",
+                "automatic resume after restart failed; start the bot manually",
+                error=exc.__class__.__name__,
+                detail=str(exc)[:240],
+            )
 
     async def request_telegram_code(self) -> dict[str, Any]:
         """Send a Telegram OTP to the configured phone number."""
