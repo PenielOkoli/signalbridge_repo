@@ -275,8 +275,8 @@ class BotSupervisor:
             self.log_store.append("info", "trading worker stopped")
             self._clear_should_run_flag()
             return await self.get_status()
-        
-        def _clear_should_run_flag(self) -> None:
+ 
+    def _clear_should_run_flag(self) -> None:
         try:
             config = self.config_manager.load_config()
         except Exception:

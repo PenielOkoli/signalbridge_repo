@@ -545,8 +545,17 @@ function AppSidebar({ active }: { active: string }) {
     { label: "Settings", icon: <Settings className="h-4 w-4" />, href: "/settings" }
   ];
 
+  async function logoutAccount() {
+    const connection = readBridgeConnection(process.env.NEXT_PUBLIC_SIGNALBRIDGE_API_URL ?? "", "");
+    try {
+      await fetchBridgeJson(connection, "/auth/logout", { method: "POST" });
+    } finally {
+      window.location.assign("/login");
+    }
+  }
+
   return (
-    <aside className="simple-sidebar">
+    <aside className="simple-sidebar flex flex-col">
       <div className="mb-8 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="simple-brand-mark">
@@ -561,7 +570,7 @@ function AppSidebar({ active }: { active: string }) {
           <path d="M0 10 H16 L21 3 L27 17 L32 10 H60" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
         </svg>
       </div>
-      <nav className="space-y-2">
+      <nav className="flex-1 space-y-2">
         {links.map((link) => (
           <Link key={link.label} href={link.href} className="simple-nav-link" data-active={link.label === active}>
             {link.icon}
@@ -569,6 +578,10 @@ function AppSidebar({ active }: { active: string }) {
           </Link>
         ))}
       </nav>
+      <button type="button" onClick={() => void logoutAccount()} className="simple-nav-link w-full">
+        <LogOut className="h-4 w-4" />
+        Log out
+      </button>
     </aside>
   );
 }
