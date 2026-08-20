@@ -199,8 +199,8 @@ class ExchangePositionView(TraderModel):
     mark_price: float | None = None
     leverage: float | None = None
     liquidation_price: float | None = None
-    realized_pnl: float | None = None
     unrealized_pnl: float | None = None
+    realized_pnl: float | None = None
     notional_usdt: float | None = None
 
 
@@ -510,13 +510,6 @@ class CcxtFuturesTrader:
     async def _execute_open_signal(self, signal: ParsedSignal) -> ExecutionResult:
         await self._enforce_daily_trade_limit()
         sizing = await self.calculate_position_size(signal)
-        current_market_price = await self._resolve_current_market_price(sizing.symbol)
-        self._validate_protective_prices_against_market(
-            side=sizing.side,
-            current_market_price=current_market_price,
-            stop_loss=sizing.stop_loss,
-            take_profit_targets=sizing.take_profit_targets,
-        )
 
         try:
             await self._call_exchange(
@@ -532,24 +525,26 @@ class CcxtFuturesTrader:
         stop_order: dict[str, Any] | None = None
         take_profit_orders: list[dict[str, Any]] = []
 
-        # Bybit's position/trading-stop endpoint attaches SL/TP directly to
-        # the position instead of creating separate conditional orders, but
-        # it requires the position to already exist -- so it's only used for
-        # market entries. Limit entries fall back to conditional orders
-        # below since the position may not exist yet when this runs. It also
-        # only holds one TP price at a time, so multi-target take-profit
-        # signals keep using conditional orders for every target.
-        
-        use_native_protection = (
-            self.exchange_id == ExchangeId.BYBIT.value
-            and sizing.entry_type not in (EntryType.LIMIT, "limit")
-        )
+        # Bybit lets stopLoss/takeProfit be attached directly on the entry
+        # order itself -- market or limit -- as metadata on that same order,
+        # not as separate live orders. For a limit entry, that metadata only
+        # activates once the entry fills; if the entry is canceled first,
+        # the attached protection is canceled with it automatically, since
+        # it was never a standalone order to begin with. That's what fixes
+        # the orphaned-SL/TP problem for limit entries. It only holds one TP
+        # price at a time, so multi-target take-profit signals still place
+        # the extra targets as separate conditional orders.
+        use_native_protection = self.exchange_id == ExchangeId.BYBIT.value
         attach_take_profit_natively = use_native_protection and len(sizing.take_profit_targets) == 1
 
         try:
             entry_order_params = self._entry_order_params(sizing.entry_type)
             if sizing.entry_type in (EntryType.LIMIT, "limit"):
                 entry_order_params["timeInForce"] = "GTC"
+            if use_native_protection:
+                entry_order_params["stopLoss"] = {"triggerPrice": sizing.stop_loss}
+                if attach_take_profit_natively:
+                    entry_order_params["takeProfit"] = {"triggerPrice": sizing.take_profit_targets[0]}
             entry_order = await self._call_exchange(
                 lambda: self.exchange.create_order(
                     symbol=sizing.symbol,
@@ -568,14 +563,9 @@ class CcxtFuturesTrader:
         self._record_trade_execution()
 
         remaining_take_profit_targets = [] if attach_take_profit_natively else sizing.take_profit_targets
+
         try:
-            if use_native_protection:
-                await self._set_native_position_protection(
-                    symbol=sizing.symbol,
-                    stop_loss=sizing.stop_loss,
-                    take_profit=sizing.take_profit_targets[0] if attach_take_profit_natively else None,
-                )
-            else:
+            if not use_native_protection:
                 stop_order = await self._place_reduce_only_trigger_order(
                     symbol=sizing.symbol,
                     close_side=self._opposite_side(sizing.side),
@@ -590,7 +580,7 @@ class CcxtFuturesTrader:
                     sizing.symbol,
                     Decimal(str(sizing.amount)),
                     len(remaining_take_profit_targets),
-                 )
+                )
                 for take_profit_target, take_profit_amount in zip(remaining_take_profit_targets, tp_amounts, strict=True):
                     take_profit_orders.append(
                         await self._place_reduce_only_trigger_order(
@@ -614,10 +604,11 @@ class CcxtFuturesTrader:
         message = "entry and protective orders submitted"
         if use_native_protection:
             message = (
-                "entry submitted; stop-loss and take-profit attached natively to the position"
+                "entry submitted with stop-loss and take-profit attached to the order"
                 if attach_take_profit_natively
-                else "entry submitted; stop-loss attached natively to the position, take-profit orders submitted separately"
+                else "entry submitted with stop-loss attached to the order; take-profit orders submitted separately"
             )
+
         return ExecutionResult(
             action=SignalAction.OPEN,
             symbol=sizing.symbol,
@@ -635,7 +626,7 @@ class CcxtFuturesTrader:
             take_profit_targets=sizing.take_profit_targets,
             risk_usdt=sizing.risk_usdt,
             raw_entry_status=entry_order.get("status") if entry_order else None,
-            message=message
+            message=message,
         )
 
     async def _cancel_orders(self, symbol: str) -> ExecutionResult:
@@ -697,7 +688,6 @@ class CcxtFuturesTrader:
         position_amount = self._position_contracts(position)
         entry_price = self._position_entry_price(position)
         is_bybit = self.exchange_id == ExchangeId.BYBIT.value
-        current_market_price = await self._resolve_current_market_price(signal.symbol)
 
         existing_stop_loss, existing_take_profit_targets = self._existing_protective_targets(
             snapshot,
@@ -705,13 +695,13 @@ class CcxtFuturesTrader:
             position_side,
             entry_price,
         )
-
         if is_bybit:
             native_stop_loss, native_take_profit = self._position_native_protection(position)
             if native_stop_loss is not None:
                 existing_stop_loss = native_stop_loss
             if native_take_profit is not None and not existing_take_profit_targets:
                 existing_take_profit_targets = [native_take_profit]
+
         amended_fields: list[str] = []
         stop_order: dict[str, Any] | None = None
         take_profit_orders: list[dict[str, Any]] = []
@@ -731,12 +721,6 @@ class CcxtFuturesTrader:
             stop_loss=new_stop_loss,
             take_profit_targets=take_profit_targets,
             allow_stop_at_entry=signal.move_stop_to_entry,
-        )
-        self._validate_protective_prices_against_market(
-            side=position_side,
-            current_market_price=current_market_price,
-            stop_loss=new_stop_loss,
-            take_profit_targets=take_profit_targets,
         )
         canceled_order_ids = await self._cancel_open_orders_for_symbol(signal.symbol)
 
@@ -922,39 +906,6 @@ class CcxtFuturesTrader:
             raise RiskCalculationError(f"exchange ticker for {signal.symbol} did not include a usable price")
         return price
 
-    async def _resolve_current_market_price(self, symbol: str) -> Decimal:
-        try:
-            ticker = await self._call_exchange(
-                lambda: self.exchange.fetch_ticker(
-                    symbol,
-                    params=self._request_params(),
-                )
-            )
-        except Exception as exc:
-            raise TraderConfigurationError(
-                f"unable to fetch current market price for {symbol}"
-            ) from exc
-
-        price = self._first_positive_decimal(
-            ticker.get("last"),
-            ticker.get("mark"),
-            ticker.get("bid"),
-            ticker.get("ask"),
-            (ticker.get("info") or {}).get("markPrice"),
-            (ticker.get("info") or {}).get("lastPrice"),
-            (
-                (Decimal(str(ticker["bid"])) + Decimal(str(ticker["ask"]))) / 2
-                if ticker.get("bid") not in (None, "")
-                and ticker.get("ask") not in (None, "")
-                else None
-            ),
-        )
-        if price is None:
-            raise TraderConfigurationError(
-                f"exchange ticker for {symbol} did not include a usable price"
-            )
-        return price
-
     async def _resolve_risk_budget_usdt(self) -> Decimal:
         if self.risk_config.risk_mode == RiskMode.FIXED_USDT or self.risk_config.risk_mode == "fixed_usdt":
             return Decimal(str(self.risk_config.fixed_usdt_risk))
@@ -1078,12 +1029,25 @@ class CcxtFuturesTrader:
             return "exchange service is unavailable for this account's region"
         if '"retcode":33004' in lowered or "api key has expired" in lowered:
             return "exchange API key has expired"
-        return message or exc.__class__.__name__
+        if '"retcode":110007' in lowered or "not enough for new order" in lowered:
+            return "not enough available balance for this order"
+        if '"retcode":110043' in lowered or "leverage not modified" in lowered:
+            return "leverage already set to the requested value"
+        if '"retcode":110017' in lowered or "reduce-only order" in lowered and "position" in lowered:
+            return "reduce-only order would exceed the current position size"
+        # Anything else: never surface a raw exchange JSON payload to a user-facing
+        # log line. Keep whatever human-readable text precedes the embedded JSON
+        # (ccxt error strings are typically "<ExchangeId> <message> <json blob>"),
+        # and fall back to the exception class name if nothing readable remains.
+        readable = message.split("{", 1)[0].strip(" :\u2014-")
+        if readable and readable.lower() != exc.__class__.__name__.lower():
+            return readable
+        return exc.__class__.__name__
 
     @classmethod
     def _is_non_fatal_leverage_error(cls, exc: Exception) -> bool:
-        detail = cls._exchange_error_detail(exc).lower()
-        return '"retcode":110043' in detail or "leverage not modified" in detail
+        raw = _compact_exception_chain(exc).lower()
+        return '"retcode":110043' in raw or "leverage not modified" in raw
 
     @staticmethod
     def _to_float_or_none(*values: Any) -> float | None:
@@ -1256,40 +1220,6 @@ class CcxtFuturesTrader:
             raise RiskCalculationError(f"unsupported trade side: {side}")
 
     @staticmethod
-    def _validate_protective_prices_against_market(
-        *,
-        side: TradeSide | str,
-        current_market_price: Decimal,
-        stop_loss: float | None,
-        take_profit_targets: list[float],
-    ) -> None:
-        market_price = float(current_market_price)
-
-        if side == TradeSide.BUY or side == "buy":
-            if stop_loss is not None and stop_loss >= market_price:
-                raise RiskCalculationError(
-                    f"long signal is stale: stop_loss {stop_loss:.4f} is not below the current market price {market_price:.4f}"
-                )
-            if take_profit_targets and any(target <= market_price for target in take_profit_targets):
-                raise RiskCalculationError(
-                    f"long signal is stale: take-profit targets must be above the current market price {market_price:.4f}"
-                )
-            return
-
-        if side == TradeSide.SELL or side == "sell":
-            if stop_loss is not None and stop_loss <= market_price:
-                raise RiskCalculationError(
-                    f"short signal is stale: stop_loss {stop_loss:.4f} is not above the current market price {market_price:.4f}"
-                )
-            if take_profit_targets and any(target >= market_price for target in take_profit_targets):
-                raise RiskCalculationError(
-                    f"short signal is stale: take-profit targets must be below the current market price {market_price:.4f}"
-                )
-            return
-
-        raise RiskCalculationError(f"unsupported trade side: {side}")
-
-    @staticmethod
     def _entry_order_type(entry_type: EntryType | str) -> str:
         return "limit" if entry_type == EntryType.LIMIT or entry_type == "limit" else "market"
 
@@ -1445,21 +1375,21 @@ class CcxtFuturesTrader:
                 return numeric
         raise PositionLookupError("position entry price could not be determined")
 
-        @staticmethod
-        def _position_native_protection(position: dict[str, Any]) -> tuple[float | None, float | None]:
-            """Read Bybit's native position-attached stop-loss/take-profit, if any."""
-            info = position.get("info") or {}
+    @staticmethod
+    def _position_native_protection(position: dict[str, Any]) -> tuple[float | None, float | None]:
+        """Read Bybit's native position-attached stop-loss/take-profit, if any."""
+        info = position.get("info") or {}
 
-            def _positive_or_none(value: Any) -> float | None:
-                if value in (None, ""):
-                    return None
-                try:
-                    numeric = float(value)
-                except (TypeError, ValueError):
-                    return None
-                return numeric if numeric > 0 else None
+        def _positive_or_none(value: Any) -> float | None:
+            if value in (None, ""):
+                return None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if numeric > 0 else None
 
-            return _positive_or_none(info.get("stopLoss")), _positive_or_none(info.get("takeProfit"))
+        return _positive_or_none(info.get("stopLoss")), _positive_or_none(info.get("takeProfit"))
 
 
 BybitTrader = CcxtFuturesTrader
