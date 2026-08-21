@@ -634,6 +634,25 @@ class BotSupervisor:
             return "-"
         return ", ".join(self._format_price(target) for target in targets)
 
+    @staticmethod
+    def _format_risk_reward(entry: float | None, stop_loss: float | None, targets: list[float]) -> str:
+        """Format risk-to-reward for every take-profit target in a setup."""
+
+        if entry is None or stop_loss is None or not targets:
+            return "-"
+        risk_per_unit = abs(entry - stop_loss)
+        if risk_per_unit <= 0:
+            return "-"
+
+        ratios = [abs(target - entry) / risk_per_unit for target in targets]
+        return " · ".join(f"TP{index} 1:{ratio:.2f}" for index, ratio in enumerate(ratios, start=1))
+
+    @staticmethod
+    def _format_telegram_lines(lines: list[str]) -> str:
+        """Separate Telegram notification sections with a readable blank line."""
+
+        return "\n\n".join(line for line in lines if line)
+
     async def _notify_signal_result(self, envelope: SignalEventEnvelope, result: Any) -> None:
         action = result.action
         symbol = result.symbol or "-"
@@ -644,7 +663,10 @@ class BotSupervisor:
             lines = [
                 f"\U0001F7E2 Executed \u2014 {symbol} {side}".rstrip(),
                 f"From: {chat}",
-                f"Entry {self._format_price(result.entry_price)} \u00b7 SL {self._format_price(result.stop_loss)} \u00b7 TP {self._format_take_profits(result.take_profit_targets)}",
+                f"Entry: {self._format_price(result.entry_price)}",
+                f"Stop loss: {self._format_price(result.stop_loss)}",
+                f"Take profit: {self._format_take_profits(result.take_profit_targets)}",
+                f"RR: {self._format_risk_reward(result.entry_price, result.stop_loss, result.take_profit_targets)}",
             ]
             if result.risk_usdt is not None:
                 leverage_part = f" \u00b7 {result.leverage}x" if result.leverage else ""
@@ -655,7 +677,7 @@ class BotSupervisor:
                 lines.append(
                     f"Size reduced for available margin: ${result.risk_usdt:.2f} risk of ${requested:.2f} requested · ~${margin:.2f} margin"
                 )
-            await self._send_self_notification("\n".join(lines))
+            await self._send_self_notification(self._format_telegram_lines(lines))
         elif action == SignalAction.AMEND or action == "amend":
             changes = []
             if "stop_loss" in result.amended_fields:
@@ -664,25 +686,83 @@ class BotSupervisor:
                 changes.append(f"TP \u2192 {self._format_take_profits(result.take_profit_targets)}")
             change_text = ", ".join(changes) if changes else "position updated"
             lines = [f"\U0001F504 Updated \u2014 {symbol}", f"From: {chat}", change_text]
-            await self._send_self_notification("\n".join(lines))
+            risk_reward = self._format_risk_reward(result.entry_price, result.stop_loss, result.take_profit_targets)
+            if risk_reward != "-":
+                lines.append(f"RR: {risk_reward}")
+            await self._send_self_notification(self._format_telegram_lines(lines))
         elif action == SignalAction.CLOSE or action == "close":
             portion = ""
             if result.close_fraction is not None and result.close_fraction < 1:
                 portion = f" ({result.close_fraction * 100:.0f}%)"
             lines = [f"\U0001F504 Closed \u2014 {symbol}", f"From: {chat}", f"Position closed{portion}"]
-            await self._send_self_notification("\n".join(lines))
+            await self._send_self_notification(self._format_telegram_lines(lines))
 
     async def _notify_signal_skipped(self, envelope: SignalEventEnvelope, reason: str) -> None:
-        lines = [f"\U0001F534 Skipped \u2014 {envelope.chat_name or 'unknown channel'}", f"Reason: {reason}"]
-        await self._send_self_notification("\n".join(lines))
+        lines = [
+            f"\U0001F534 Skipped \u2014 {envelope.chat_name or 'unknown channel'}",
+            f"Reason: {self._user_facing_error_reason(reason)}",
+        ]
+        await self._send_self_notification(self._format_telegram_lines(lines))
 
     async def _notify_protection_failed(self, envelope: SignalEventEnvelope, reason: str) -> None:
         lines = [
             f"\u26A0\uFE0F Entry placed, protection FAILED \u2014 {envelope.chat_name or 'unknown channel'}",
-            reason,
+            self._user_facing_error_reason(reason),
             "Check your position manually.",
         ]
-        await self._send_self_notification("\n".join(lines))
+        await self._send_self_notification(self._format_telegram_lines(lines))
+
+    @staticmethod
+    def _user_facing_error_reason(reason: str | BaseException) -> str:
+        """Turn exchange/provider exceptions into short, safe Telegram text.
+
+        Telegram notifications are for operators, not raw API diagnostics. In
+        particular, CCXT often appends an exchange JSON response to its error
+        string. Keep those details in the local runtime log, but never forward
+        them to a chat notification.
+        """
+
+        message = " ".join(str(reason).split()).strip()
+        lowered = message.lower()
+
+        if not message:
+            return "The request could not be completed. Please try the next valid signal."
+        if (
+            '"retcode":"110007"' in lowered
+            or "not enough for new order" in lowered
+            or "insufficientfunds" in lowered
+            or "insufficient funds" in lowered
+            or "not enough available balance" in lowered
+        ):
+            return "Not enough free USDT margin for this order. Add collateral or release funds from open orders/positions."
+        if "no free usdt margin" in lowered or "available usdt margin is too low" in lowered:
+            return "Not enough free USDT margin for this order. Add collateral or release funds from open orders/positions."
+        if "minimum" in lowered and ("amount" in lowered or "notional" in lowered or "order size" in lowered):
+            return "The available margin is below this market's minimum order size. Add collateral or use a larger account balance."
+        if "daily trade limit" in lowered:
+            return "Your daily trade limit has been reached."
+        if "api key" in lowered or "authentication" in lowered or "permission" in lowered:
+            return "The exchange API credentials or trading permissions need attention in Settings."
+        if "network error" in lowered or "dns" in lowered or "timed out" in lowered or "timeout" in lowered:
+            return "The exchange could not be reached. The signal was not submitted; try again when the connection is restored."
+        if "restricted" in lowered or "compliance" in lowered or "regional eligibility" in lowered:
+            return "The exchange account is restricted from trading this product. Check KYC, region, and account eligibility."
+        if "rate limit" in lowered:
+            return "The exchange is temporarily rate-limiting requests. The signal was not submitted; try again shortly."
+        if "openai" in lowered or "groq" in lowered or "parser" in lowered:
+            return "The signal could not be read by the parser. It was not submitted."
+        if "validationerror" in lowered or "validation error" in lowered or "input_value" in lowered:
+            return "The signal details were invalid or incomplete, so no order was submitted."
+        # Raw JSON, Python reprs, and traceback fragments should never leak to
+        # Telegram. These are still retained in the local structured log.
+        if any(marker in message for marker in ('{"', "{'", "Traceback", "\\n  File ", "retCode", "retMsg")):
+            return "The exchange rejected the request. Review the signal details and available margin."
+
+        # Do not forward an unrecognized dependency error verbatim. Future
+        # exchange/SDK releases may include request payloads, identifiers, or
+        # other implementation details in strings that do not match the raw
+        # markers above.
+        return "The order could not be completed. Review the signal details, account balance, and exchange settings."
         
     async def _handle_signal_event(self, event: Any, event_type: Literal["new_message", "edited_message"]) -> None:
         async with self._signal_event_lock:

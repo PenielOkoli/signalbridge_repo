@@ -4,6 +4,7 @@ import unittest
 from decimal import Decimal, ROUND_DOWN
 
 from config_manager import ExchangeConfig, RiskConfig
+from bot_runtime import BotSupervisor
 from signal_parser import EntryType, ParsedSignal, SignalAction, TradeSide
 from trader import CcxtFuturesTrader, RiskCalculationError
 
@@ -76,3 +77,42 @@ class MarginAwareSizingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RiskCalculationError, "no free USDT margin"):
             await make_trader("0", "1000").calculate_position_size(limit_signal())
 
+
+class UserFacingErrorTests(unittest.TestCase):
+    def test_trade_notification_formats_rr_and_blank_lines(self) -> None:
+        self.assertEqual(
+            BotSupervisor._format_risk_reward(100, 95, [110, 115]),
+            "TP1 1:2.00 · TP2 1:3.00",
+        )
+        self.assertEqual(
+            BotSupervisor._format_telegram_lines(["Title", "Details", "Risk: $5"]),
+            "Title\n\nDetails\n\nRisk: $5",
+        )
+
+    def test_bybit_json_error_becomes_a_clear_margin_message(self) -> None:
+        raw_error = (
+            "failed to place limit entry for MNT/USDT:USDT: bybit "
+            '{"retCode":"110007","retMsg":"ab not enough for new order","result":{},"time":178728911008}'
+        )
+
+        message = BotSupervisor._user_facing_error_reason(raw_error)
+
+        self.assertEqual(
+            message,
+            "Not enough free USDT margin for this order. Add collateral or release funds from open orders/positions.",
+        )
+        self.assertNotIn("retCode", message)
+        self.assertNotIn("178728911008", message)
+
+    def test_unknown_raw_payload_is_not_forwarded_to_telegram(self) -> None:
+        message = BotSupervisor._user_facing_error_reason('Bybit rejected request {"retCode":"10001","detail":"internal"}')
+
+        self.assertEqual(message, "The exchange rejected the request. Review the signal details and available margin.")
+
+    def test_unrecognized_technical_error_is_not_forwarded_to_telegram(self) -> None:
+        message = BotSupervisor._user_facing_error_reason("BadRequest: request-id=abc123 malformed exchange response")
+
+        self.assertEqual(
+            message,
+            "The order could not be completed. Review the signal details, account balance, and exchange settings.",
+        )
