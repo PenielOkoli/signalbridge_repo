@@ -28,6 +28,7 @@ from auth_manager import (
     SessionClaims,
     SessionValidationError,
     SignupDisabledError,
+    session_idle_timeout_seconds,
 )
 from password_reset_mailer import PasswordResetDeliveryError, PasswordResetMailer
 from bot_runtime import RuntimeConfigurationError, RuntimeSupervisorError, TelegramAuthError
@@ -216,7 +217,7 @@ def create_app(
         allow_origins=cors_origins or cors_origins_from_env(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-SignalBridge-User-Activity"],
     )
 
     @app.middleware("http")
@@ -235,14 +236,24 @@ def create_app(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    def require_session(request: Request) -> SessionClaims:
+    def require_session(request: Request, response: Response) -> SessionClaims:
         token = request.cookies.get(AUTH_COOKIE_NAME, "")
         if not token:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
         try:
-            return auth_manager.verify_session(token)
+            claims = auth_manager.verify_session(token)
         except SessionValidationError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+        # Renew only after a valid request caused by recent browser activity.
+        # Background dashboard polling still validates the session, but cannot
+        # keep it alive after the user stops using the site.
+        user = auth_manager.get_user_by_id(claims.sub)
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session user no longer exists")
+        if request.headers.get("x-signalbridge-user-activity") == "1":
+            _set_session_cookie(response, auth_manager.issue_session(user, workspace_id=claims.workspace_id))
+        return claims
 
     async def require_workspace_context(claims: SessionClaims = Depends(require_session)) -> tuple[SessionClaims, WorkspaceServices]:
         workspace_id = claims.workspace_id or auth_manager.workspace_id_for_user(claims.sub)
@@ -627,13 +638,7 @@ def _clear_session_cookie(response: Response) -> None:
 
 
 def _session_cookie_max_age() -> int:
-    raw = os.getenv("SIGNALBRIDGE_SESSION_TTL_SECONDS", "").strip()
-    if not raw:
-        return 60 * 60 * 24 * 7
-    try:
-        return max(300, int(raw))
-    except ValueError:
-        return 60 * 60 * 24 * 7
+    return session_idle_timeout_seconds()
 
 
 def _cookie_secure() -> bool:

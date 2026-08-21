@@ -26,7 +26,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 
 AUTH_COOKIE_NAME = "signalbridge_session"
-DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
+# A session is renewed while the user is actively making authenticated requests.
+# If the browser is inactive for this duration, a new login is required.
+DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS = 60 * 10
 # Existing records carry their own iteration count and remain valid. New local
 # owner passwords use a stronger work factor while OAuth is being introduced.
 PASSWORD_HASH_ITERATIONS = 600_000
@@ -134,6 +136,11 @@ class AuthManager:
             "workspace_id": user.workspace_id,
         }
 
+    def get_user_by_id(self, user_id: str) -> AuthUser | None:
+        """Return the current user record for safely renewing a session."""
+
+        return next((user for user in self._load_store().users if user.id == user_id), None)
+
     def create_user(self, email: str, password: str, name: str) -> AuthUser:
         if not self.signup_enabled():
             raise SignupDisabledError("signup is disabled after the first account")
@@ -232,7 +239,7 @@ class AuthManager:
 
     def issue_session(self, user: AuthUser, ttl_seconds: int | None = None, workspace_id: str | None = None) -> str:
         now = int(time.time())
-        ttl = ttl_seconds or _session_ttl_seconds()
+        ttl = ttl_seconds or session_idle_timeout_seconds()
         issued_at = max(now, user.password_changed_at + 1)
         resolved_workspace_id = workspace_id or getattr(user, "workspace_id", None) or self.workspace_id_for_user(user.id)
         claims = {
@@ -389,14 +396,18 @@ def _resolve_signing_secret() -> str:
     return generated
 
 
-def _session_ttl_seconds() -> int:
-    raw = os.getenv("SIGNALBRIDGE_SESSION_TTL_SECONDS", "").strip()
+def session_idle_timeout_seconds() -> int:
+    """Read the rolling idle-session timeout, retaining the prior env name."""
+
+    raw = os.getenv("SIGNALBRIDGE_SESSION_IDLE_TIMEOUT_SECONDS", "").strip()
     if not raw:
-        return DEFAULT_SESSION_TTL_SECONDS
+        raw = os.getenv("SIGNALBRIDGE_SESSION_TTL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS
     try:
         return max(300, int(raw))
     except ValueError:
-        return DEFAULT_SESSION_TTL_SECONDS
+        return DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS
 
 
 def _env_flag(name: str) -> bool:

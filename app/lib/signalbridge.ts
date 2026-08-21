@@ -152,6 +152,29 @@ export type BridgeConnection = {
   token: string;
 };
 
+const USER_ACTIVITY_RENEWAL_WINDOW_MS = 60_000;
+let activityTrackingStarted = false;
+let lastUserActivityAt = 0;
+
+function hasRecentUserActivity() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  if (!activityTrackingStarted) {
+    activityTrackingStarted = true;
+    lastUserActivityAt = Date.now();
+    const markUserActivity = () => {
+      lastUserActivityAt = Date.now();
+    };
+    for (const eventName of ["pointerdown", "keydown", "touchstart", "scroll"]) {
+      window.addEventListener(eventName, markUserActivity, { passive: true });
+    }
+  }
+
+  return Date.now() - lastUserActivityAt < USER_ACTIVITY_RENEWAL_WINDOW_MS;
+}
+
 export function readBridgeConnection(defaultApiUrl = "", defaultToken = ""): BridgeConnection {
   return {
     apiUrl: defaultApiUrl,
@@ -182,13 +205,15 @@ export async function fetchBridgeJson<T>(
     ...init,
     headers: {
       ...(useDirectBridge ? { Authorization: `Bearer ${connection.token}` } : {}),
+      "X-SignalBridge-User-Activity": hasRecentUserActivity() ? "1" : "0",
       ...(init?.headers ?? {})
     }
   });
 
   if (!response.ok) {
     if (response.status === 401 && typeof window !== "undefined" && !path.startsWith("/auth/")) {
-      window.location.assign("/login");
+      const next = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`/login?reason=session-expired&next=${encodeURIComponent(next)}`);
     }
     let detail = `${response.status} ${response.statusText}`;
     try {

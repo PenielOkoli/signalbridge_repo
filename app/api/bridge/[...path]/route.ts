@@ -37,6 +37,7 @@ async function proxyBridgeRequest(request: NextRequest, context: RouteContext) {
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": request.headers.get("content-type") ?? "application/json",
+      "X-SignalBridge-User-Activity": request.headers.get("x-signalbridge-user-activity") ?? "0",
       ...(request.headers.get("cookie") ? { Cookie: request.headers.get("cookie") as string } : {})
     },
     body

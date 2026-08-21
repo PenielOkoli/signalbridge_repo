@@ -31,8 +31,14 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
   }, [isResetPassword]);
 
   useEffect(() => {
-    if (mode === "login" && new URLSearchParams(window.location.search).get("passwordReset") === "1") {
+    if (mode !== "login") {
+      return;
+    }
+    const query = new URLSearchParams(window.location.search);
+    if (query.get("passwordReset") === "1") {
       setMessage("Password updated. You can now log in with your new password.");
+    } else if (query.get("reason") === "session-expired") {
+      setMessage("You were logged out after a period of inactivity. Log in to continue.");
     }
   }, [mode]);
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from auth_manager import AuthManager, InvalidCredentialsError, PasswordResetError, SessionValidationError
 
@@ -44,3 +45,15 @@ class PasswordResetTests(unittest.TestCase):
     def test_unknown_email_does_not_create_a_recovery_token(self) -> None:
         self.assertIsNone(self.manager.create_password_reset_token("unknown@example.com"))
 
+    def test_session_uses_the_configured_idle_timeout(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "SIGNALBRIDGE_SESSION_IDLE_TIMEOUT_SECONDS": "600",
+                "SIGNALBRIDGE_SESSION_TTL_SECONDS": "604800",
+            },
+        ):
+            session = self.manager.issue_session(self.user)
+
+        claims = self.manager.verify_session(session)
+        self.assertEqual(claims.exp - claims.iat, 600)
