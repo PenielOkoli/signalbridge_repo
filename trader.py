@@ -570,26 +570,30 @@ class CcxtFuturesTrader:
         stop_order: dict[str, Any] | None = None
         take_profit_orders: list[dict[str, Any]] = []
 
-        # Bybit lets stopLoss/takeProfit be attached directly on the entry
-        # order itself -- market or limit -- as metadata on that same order,
-        # not as separate live orders. For a limit entry, that metadata only
-        # activates once the entry fills; if the entry is canceled first,
-        # the attached protection is canceled with it automatically, since
-        # it was never a standalone order to begin with. That's what fixes
-        # the orphaned-SL/TP problem for limit entries. It only holds one TP
-        # price at a time, so multi-target take-profit signals still place
-        # the extra targets as separate conditional orders.
+        # Send Bybit one entry request with full-position TP/SL attached. The
+        # exchange may display its internally managed TP/SL legs separately,
+        # but they remain linked to the parent entry instead of being separate
+        # orders submitted by SignalBridge. A full-position attachment supports
+        # one TP price, so Bybit signals intentionally use their first target.
         use_native_protection = self.exchange_id == ExchangeId.BYBIT.value
-        attach_take_profit_natively = use_native_protection and len(sizing.take_profit_targets) == 1
+        attach_take_profit_natively = use_native_protection and bool(sizing.take_profit_targets)
 
         try:
             entry_order_params = self._entry_order_params(sizing.entry_type)
             if sizing.entry_type in (EntryType.LIMIT, "limit"):
                 entry_order_params["timeInForce"] = "GTC"
             if use_native_protection:
-                entry_order_params["stopLoss"] = {"triggerPrice": sizing.stop_loss}
-                if attach_take_profit_natively:
-                    entry_order_params["takeProfit"] = {"triggerPrice": sizing.take_profit_targets[0]}
+                entry_order_params.update(
+                    {
+                        "stopLoss": {"triggerPrice": sizing.stop_loss},
+                        "takeProfit": {"triggerPrice": sizing.take_profit_targets[0]},
+                        "tpslMode": "Full",
+                        "tpOrderType": "Market",
+                        "slOrderType": "Market",
+                        "tpTriggerBy": "MarkPrice",
+                        "slTriggerBy": "MarkPrice",
+                    }
+                )
             entry_order = await self._call_exchange(
                 lambda: self.exchange.create_order(
                     symbol=sizing.symbol,
@@ -773,7 +777,7 @@ class CcxtFuturesTrader:
         )
         canceled_order_ids = await self._cancel_open_orders_for_symbol(signal.symbol)
 
-        attach_take_profit_natively = is_bybit and len(take_profit_targets) == 1
+        attach_take_profit_natively = is_bybit and bool(take_profit_targets)
         remaining_take_profit_targets = take_profit_targets
         used_native_protection = False
 
@@ -910,8 +914,12 @@ class CcxtFuturesTrader:
         request["tpslMode"] = "Full"
         if stop_loss is not None:
             request["stopLoss"] = self.exchange.price_to_precision(symbol, stop_loss)
+            request["slOrderType"] = "Market"
+            request["slTriggerBy"] = "MarkPrice"
         if take_profit is not None:
             request["takeProfit"] = self.exchange.price_to_precision(symbol, take_profit)
+            request["tpOrderType"] = "Market"
+            request["tpTriggerBy"] = "MarkPrice"
 
         last_error: Exception | None = None
         for attempt in range(attempts):
@@ -1200,7 +1208,11 @@ class CcxtFuturesTrader:
         targets = list(signal.take_profit_targets)
         if not targets and signal.take_profit is not None:
             targets = [signal.take_profit]
-        return targets[: self.risk_config.max_take_profit_orders]
+        # Bybit Full TP/SL is position-attached and has one complete-position
+        # take-profit value. Do not turn later signal targets into standalone
+        # reduce-only orders; use the first target as the native TP instead.
+        maximum = 1 if self.exchange_id == ExchangeId.BYBIT.value else self.risk_config.max_take_profit_orders
+        return targets[:maximum]
 
     def _split_amount_across_targets(self, symbol: str, total_amount: Decimal, target_count: int) -> list[float]:
         if target_count <= 0:

@@ -114,7 +114,10 @@ class BotSupervisor:
     async def shutdown(self) -> None:
         """Gracefully stop background services and pending auth sessions."""
 
-        await self.stop_bot()
+        # A process shutdown is different from a user choosing Stop in the
+        # dashboard. Preserve the persisted run intent so the workspace can be
+        # resumed when this service process starts again.
+        await self.stop_bot(clear_should_run=False)
         await self._clear_pending_login()
 
     async def get_status(self) -> dict[str, Any]:
@@ -245,13 +248,19 @@ class BotSupervisor:
                 self.config_manager.save_config(config)
             return await self.get_status()
 
-    async def stop_bot(self) -> dict[str, Any]:
-        """Stop the Telegram worker if it is active."""
+    async def stop_bot(self, *, clear_should_run: bool = True) -> dict[str, Any]:
+        """Stop the Telegram worker if it is active.
+
+        ``clear_should_run`` is false only during process shutdown, preserving
+        a running workspace's restart intent. Dashboard and Telegram logout
+        actions use the default so they remain an explicit stop.
+        """
 
         async with self._lock:
             if self._bot_state in {"stopped", "error"} and self._bot_task is None:
                 self._bot_state = "stopped"
-                self._clear_should_run_flag()
+                if clear_should_run:
+                    self._clear_should_run_flag()
                 return await self.get_status()
 
             self._bot_state = "stopping"
@@ -273,7 +282,8 @@ class BotSupervisor:
             self._bot_state = "stopped"
             self._started_at = None
             self.log_store.append("info", "trading worker stopped")
-            self._clear_should_run_flag()
+            if clear_should_run:
+                self._clear_should_run_flag()
             return await self.get_status()
  
     def _clear_should_run_flag(self) -> None:

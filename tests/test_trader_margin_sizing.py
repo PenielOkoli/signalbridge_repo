@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal, ROUND_DOWN
+from collections import deque
+from unittest.mock import AsyncMock
 
 from config_manager import ExchangeConfig, RiskConfig
 from bot_runtime import BotSupervisor
 from signal_parser import EntryType, ParsedSignal, SignalAction, TradeSide
-from trader import CcxtFuturesTrader, RiskCalculationError
+from trader import CcxtFuturesTrader, EXCHANGE_SPECS, PositionSizing, RiskCalculationError
 
 
 SYMBOL = "BTC/USDT:USDT"
@@ -37,12 +39,44 @@ class FakeExchange:
         return str(Decimal(str(amount)).quantize(Decimal("0.001"), rounding=ROUND_DOWN))
 
 
+class AttachedProtectionExchange(FakeExchange):
+    def __init__(self) -> None:
+        super().__init__("1000", "1000")
+        self.orders: list[dict[str, object]] = []
+
+    async def set_leverage(self, leverage: int, symbol: str, params: dict[str, object]) -> None:
+        del leverage, symbol, params
+
+    async def create_order(self, **order: object) -> dict[str, object]:
+        self.orders.append(order)
+        return {"id": "entry-1", "status": "open"}
+
+
+class NativePositionProtectionExchange(AttachedProtectionExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trading_stop_requests: list[dict[str, object]] = []
+
+    def market(self, symbol: str) -> dict[str, str]:
+        self.assert_symbol = symbol
+        return {"id": "BTCUSDT"}
+
+    def price_to_precision(self, symbol: str, price: float) -> str:
+        del symbol
+        return str(price)
+
+    async def private_post_v5_position_trading_stop(self, request: dict[str, object]) -> dict[str, object]:
+        self.trading_stop_requests.append(request)
+        return {"retCode": 0}
+
+
 def make_trader(free_usdt: str, total_usdt: str) -> CcxtFuturesTrader:
     # Position sizing is isolated from exchange construction so this test never
     # contacts an exchange or needs API credentials.
     trader = object.__new__(CcxtFuturesTrader)
     trader.exchange = FakeExchange(free_usdt, total_usdt)
     trader.exchange_config = ExchangeConfig(default_leverage=10)
+    trader.exchange_id = "bybit"
     trader.exchange_spec = {"balance_params": {}}
     trader.risk_config = RiskConfig(fixed_usdt_risk=100, max_leverage=10)
     return trader
@@ -76,6 +110,90 @@ class MarginAwareSizingTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_free_margin_never_falls_back_to_total_equity(self) -> None:
         with self.assertRaisesRegex(RiskCalculationError, "no free USDT margin"):
             await make_trader("0", "1000").calculate_position_size(limit_signal())
+
+    async def test_bybit_submits_one_entry_request_with_attached_full_tp_sl(self) -> None:
+        exchange = AttachedProtectionExchange()
+        trader = object.__new__(CcxtFuturesTrader)
+        trader.exchange = exchange
+        trader.exchange_config = ExchangeConfig(default_leverage=10)
+        trader.exchange_id = "bybit"
+        trader.exchange_spec = EXCHANGE_SPECS["bybit"]
+        trader.risk_config = RiskConfig(fixed_usdt_risk=100, max_leverage=10, max_take_profit_orders=3)
+        trader._executed_trade_timestamps = deque()
+        trader.calculate_position_size = AsyncMock(
+            return_value=PositionSizing(
+                symbol=SYMBOL,
+                side=TradeSide.BUY,
+                entry_type=EntryType.LIMIT,
+                leverage=10,
+                amount=1,
+                entry_price=100,
+                stop_loss=90,
+                take_profit_targets=[110],
+                risk_usdt=10,
+                requested_risk_usdt=10,
+                estimated_notional_usdt=100,
+                estimated_margin_usdt=10,
+                available_margin_usdt=100,
+            )
+        )
+
+        result = await trader._execute_open_signal(limit_signal())
+
+        self.assertEqual(len(exchange.orders), 1)
+        params = exchange.orders[0]["params"]
+        self.assertEqual(
+            params,
+            {
+                "category": "linear",
+                "timeInForce": "GTC",
+                "stopLoss": {"triggerPrice": 90},
+                "takeProfit": {"triggerPrice": 110},
+                "tpslMode": "Full",
+                "tpOrderType": "Market",
+                "slOrderType": "Market",
+                "tpTriggerBy": "MarkPrice",
+                "slTriggerBy": "MarkPrice",
+            },
+        )
+        self.assertTrue(result.protective_orders_native)
+        self.assertEqual(result.take_profit_order_ids, [])
+
+    def test_bybit_uses_only_the_first_take_profit_for_native_protection(self) -> None:
+        trader = make_trader("100", "100")
+        trader.exchange_id = "bybit"
+        trader.risk_config = RiskConfig(max_take_profit_orders=3)
+        signal = limit_signal()
+        signal.take_profit_targets = [110, 120, 130]
+
+        self.assertEqual(trader._selected_take_profit_targets(signal), [110])
+
+    async def test_bybit_amend_uses_native_position_tp_sl(self) -> None:
+        exchange = NativePositionProtectionExchange()
+        trader = object.__new__(CcxtFuturesTrader)
+        trader.exchange = exchange
+        trader.exchange_id = "bybit"
+        trader.exchange_spec = EXCHANGE_SPECS["bybit"]
+
+        await trader._set_native_position_protection(SYMBOL, stop_loss=90, take_profit=110)
+
+        self.assertEqual(
+            exchange.trading_stop_requests,
+            [
+                {
+                    "category": "linear",
+                    "symbol": "BTCUSDT",
+                    "positionIdx": 0,
+                    "tpslMode": "Full",
+                    "stopLoss": "90",
+                    "slOrderType": "Market",
+                    "slTriggerBy": "MarkPrice",
+                    "takeProfit": "110",
+                    "tpOrderType": "Market",
+                    "tpTriggerBy": "MarkPrice",
+                }
+            ],
+        )
 
 
 class UserFacingErrorTests(unittest.TestCase):

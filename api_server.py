@@ -8,8 +8,9 @@ on the VM filesystem and are never returned to the dashboard.
 
 from __future__ import annotations
 
+import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlencode
 from typing import Any, Literal
 
@@ -193,9 +194,16 @@ def create_app(
                 await create_all_tables(engine)
             finally:
                 await engine.dispose()
+        # Resume in the background so one unavailable Telegram account cannot
+        # delay the API becoming healthy or prevent other workspaces starting.
+        resume_task = asyncio.create_task(registry.resume_all(), name="signalbridge-resume-workspaces")
         try:
             yield
         finally:
+            if not resume_task.done():
+                resume_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await resume_task
             await registry.shutdown_all()
 
     app = FastAPI(title="SignalBridge API", version="1.0.0", lifespan=lifespan)
