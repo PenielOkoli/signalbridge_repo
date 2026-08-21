@@ -30,7 +30,8 @@ DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
 # Existing records carry their own iteration count and remain valid. New local
 # owner passwords use a stronger work factor while OAuth is being introduced.
 PASSWORD_HASH_ITERATIONS = 600_000
-USER_STORE_VERSION = 1
+USER_STORE_VERSION = 2
+PASSWORD_RESET_TTL_SECONDS = 60 * 60
 
 
 class AuthError(RuntimeError):
@@ -49,6 +50,10 @@ class SignupDisabledError(AuthError):
     """Raised when public signup is disabled after the first account."""
 
 
+class PasswordResetError(AuthError):
+    """Raised when a password-reset link is invalid or expired."""
+
+
 class AuthModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -60,6 +65,7 @@ class AuthUser(AuthModel):
     workspace_id: str | None = None
     password_hash: str = Field(repr=False)
     created_at: int
+    password_changed_at: int = 0
 
     @field_validator("email")
     @classmethod
@@ -85,9 +91,17 @@ class PublicUser(AuthModel):
     workspace_id: str | None = None
 
 
+class PasswordResetToken(AuthModel):
+    user_id: str
+    token_hash: str = Field(repr=False)
+    created_at: int
+    expires_at: int
+
+
 class UserStore(AuthModel):
     version: int = USER_STORE_VERSION
     users: list[AuthUser] = Field(default_factory=list)
+    password_reset_tokens: list[PasswordResetToken] = Field(default_factory=list)
 
 
 class SessionClaims(AuthModel):
@@ -154,17 +168,80 @@ class AuthManager:
                 return user
         raise InvalidCredentialsError("invalid email or password")
 
+    def create_password_reset_token(self, email: str) -> str | None:
+        """Create one short-lived reset token for an existing local account.
+
+        Only the SHA-256 digest is stored, so a filesystem disclosure cannot be
+        used to reset an account. Callers must return the same response whether
+        this method finds a user or not to avoid account enumeration.
+        """
+
+        store = self._load_store()
+        now = int(time.time())
+        self._discard_expired_reset_tokens(store, now)
+        clean_email = email.strip().lower()
+        user = next((candidate for candidate in store.users if candidate.email == clean_email), None)
+        if user is None:
+            self._save_store(store)
+            return None
+
+        token = secrets.token_urlsafe(32)
+        store.password_reset_tokens = [item for item in store.password_reset_tokens if item.user_id != user.id]
+        store.password_reset_tokens.append(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=_hash_reset_token(token),
+                created_at=now,
+                expires_at=now + PASSWORD_RESET_TTL_SECONDS,
+            )
+        )
+        self._save_store(store)
+        return token
+
+    def reset_password(self, token: str, new_password: str) -> AuthUser:
+        if len(new_password) < 8:
+            raise ValueError("password must be at least 8 characters")
+        if not token or len(token) > 512:
+            raise PasswordResetError("password-reset link is invalid or expired")
+
+        store = self._load_store()
+        now = int(time.time())
+        self._discard_expired_reset_tokens(store, now)
+        token_hash = _hash_reset_token(token)
+        matching = next(
+            (item for item in store.password_reset_tokens if hmac.compare_digest(item.token_hash, token_hash)),
+            None,
+        )
+        if matching is None:
+            self._save_store(store)
+            raise PasswordResetError("password-reset link is invalid or expired")
+
+        user = next((candidate for candidate in store.users if candidate.id == matching.user_id), None)
+        if user is None:
+            store.password_reset_tokens = [item for item in store.password_reset_tokens if item is not matching]
+            self._save_store(store)
+            raise PasswordResetError("password-reset link is invalid or expired")
+
+        user.password_hash = _hash_password(new_password)
+        user.password_changed_at = now
+        # Reset links are single-use and changing the password invalidates every
+        # other outstanding recovery link for that account.
+        store.password_reset_tokens = [item for item in store.password_reset_tokens if item.user_id != user.id]
+        self._save_store(store)
+        return user
+
     def issue_session(self, user: AuthUser, ttl_seconds: int | None = None, workspace_id: str | None = None) -> str:
         now = int(time.time())
         ttl = ttl_seconds or _session_ttl_seconds()
+        issued_at = max(now, user.password_changed_at + 1)
         resolved_workspace_id = workspace_id or getattr(user, "workspace_id", None) or self.workspace_id_for_user(user.id)
         claims = {
             "sub": user.id,
             "email": user.email,
             "name": user.name,
             "workspace_id": resolved_workspace_id,
-            "iat": now,
-            "exp": now + ttl,
+            "iat": issued_at,
+            "exp": issued_at + ttl,
         }
         return _encode_jwt(claims, self.signing_secret)
 
@@ -183,6 +260,11 @@ class AuthManager:
             if not workspace_id:
                 raise SessionValidationError("session user is not assigned to a workspace")
             claims.workspace_id = workspace_id
+        user = next((candidate for candidate in self._load_store().users if candidate.id == claims.sub), None)
+        if user is None:
+            raise SessionValidationError("session user no longer exists")
+        if user.password_changed_at and claims.iat <= user.password_changed_at:
+            raise SessionValidationError("session was revoked after a password change")
         return claims
 
     def workspace_id_for_user(self, user_id: str) -> str | None:
@@ -202,6 +284,7 @@ class AuthManager:
 
     def _save_store(self, store: UserStore) -> None:
         self.users_path.parent.mkdir(parents=True, exist_ok=True)
+        store.version = USER_STORE_VERSION
         serialized = json.dumps(store.model_dump(mode="json"), indent=2, sort_keys=True)
         with NamedTemporaryFile("w", encoding="utf-8", dir=self.users_path.parent, delete=False) as handle:
             handle.write(serialized)
@@ -214,6 +297,10 @@ class AuthManager:
             with suppress(OSError):
                 temp_path.unlink(missing_ok=True)
             raise AuthError(f"failed to save user store: {exc}") from exc
+
+    @staticmethod
+    def _discard_expired_reset_tokens(store: UserStore, now: int) -> None:
+        store.password_reset_tokens = [item for item in store.password_reset_tokens if item.expires_at > now]
 
 
 def _hash_password(password: str) -> str:
@@ -238,6 +325,10 @@ def _verify_password(password: str, stored_hash: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _encode_jwt(payload: dict[str, Any], secret: str) -> str:

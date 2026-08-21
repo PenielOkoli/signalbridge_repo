@@ -351,8 +351,8 @@ class BotSupervisor:
             self.log_store.append("info", "telegram login code requested")
             return await self.get_status()
 
-    async def verify_telegram_code(self, code: str, password: str | None = None) -> dict[str, Any]:
-        """Verify the Telegram login code and persist the session file locally."""
+    async def verify_telegram_code(self, code: str) -> dict[str, Any]:
+        """Verify the Telegram login code or advance to the 2FA step."""
 
         async with self._lock:
             config = self._load_or_initialize_config()
@@ -367,14 +367,9 @@ class BotSupervisor:
                     phone_code_hash=pending.phone_code_hash,
                 )
             except SessionPasswordNeededError:
-                if not password:
-                    self._auth_state = "password_required"
-                    self.log_store.append("warning", "telegram account requires two-factor password")
-                    raise TelegramAuthError("telegram account requires a two-factor password") from None
-                try:
-                    await pending.client.sign_in(password=password)
-                except Exception as exc:
-                    raise TelegramAuthError("telegram two-factor password was rejected") from exc
+                self._auth_state = "password_required"
+                self.log_store.append("info", "telegram account requires two-factor password")
+                return await self.get_status()
             except PhoneCodeInvalidError as exc:
                 raise TelegramAuthError("telegram login code is invalid") from exc
             except PhoneCodeExpiredError as exc:
@@ -384,6 +379,28 @@ class BotSupervisor:
 
             self._auth_state = "authenticated"
             self.log_store.append("info", "telegram session authenticated and stored locally")
+            await pending.client.disconnect()
+            self._pending_login = None
+            return await self.get_status()
+
+    async def verify_telegram_password(self, password: str) -> dict[str, Any]:
+        """Complete a pending Telegram login that requires two-factor auth."""
+
+        async with self._lock:
+            pending = self._pending_login
+            if pending is None or self._auth_state != "password_required":
+                raise TelegramAuthError("no pending Telegram two-factor verification; verify a login code first")
+            if not password:
+                raise TelegramAuthError("enter your Telegram two-factor password")
+
+            try:
+                await pending.client.sign_in(password=password)
+            except Exception as exc:
+                self._auth_state = "password_required"
+                raise TelegramAuthError("telegram two-factor password was rejected") from exc
+
+            self._auth_state = "authenticated"
+            self.log_store.append("info", "telegram session authenticated with two-factor password")
             await pending.client.disconnect()
             self._pending_login = None
             return await self.get_status()

@@ -24,10 +24,12 @@ from auth_manager import (
     AuthError,
     AuthManager,
     InvalidCredentialsError,
+    PasswordResetError,
     SessionClaims,
     SessionValidationError,
     SignupDisabledError,
 )
+from password_reset_mailer import PasswordResetDeliveryError, PasswordResetMailer
 from bot_runtime import RuntimeConfigurationError, RuntimeSupervisorError, TelegramAuthError
 from database import create_all_tables, create_async_engine_from_env, create_session_maker
 from google_oauth import GoogleOAuthError, GoogleOAuthService, STATE_COOKIE_NAME
@@ -129,6 +131,14 @@ class TelegramVerifyPayload(BaseModel):
     password: str | None = Field(default=None, repr=False)
 
 
+class TelegramPasswordVerifyPayload(BaseModel):
+    # Telegram passwords may intentionally begin or end with a space, so do
+    # not apply the general payload whitespace normalisation here.
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=1, max_length=512, repr=False)
+
+
 class AuthSignupPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -144,6 +154,19 @@ class AuthLoginPayload(BaseModel):
     password: str = Field(min_length=8, max_length=512, repr=False)
 
 
+class PasswordResetRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    email: str = Field(min_length=3, max_length=254)
+
+
+class PasswordResetConfirmPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    token: str = Field(min_length=1, max_length=512, repr=False)
+    password: str = Field(min_length=8, max_length=512, repr=False)
+
+
 def create_app(
     config_manager: ConfigManager | None = None,
     workspace_registry: WorkspaceServiceRegistry | None = None,
@@ -153,6 +176,7 @@ def create_app(
 
     manager = config_manager or ConfigManager()
     auth_manager = AuthManager()
+    password_reset_mailer = PasswordResetMailer()
     rate_limiter = InMemoryRateLimiter()
     bearer = HTTPBearer(auto_error=False)
     registry = workspace_registry or WorkspaceServiceRegistry()
@@ -176,6 +200,7 @@ def create_app(
     app = FastAPI(title="SignalBridge API", version="1.0.0", lifespan=lifespan)
     app.state.config_manager = manager
     app.state.auth_manager = auth_manager
+    app.state.password_reset_mailer = password_reset_mailer
     app.state.workspace_registry = registry
     app.state.google_oauth = google_oauth
     app.state.workspace_repository = workspace_repository
@@ -236,6 +261,12 @@ def create_app(
 
     def limit_telegram_verify_attempts(request: Request) -> None:
         rate_limiter.check(request, "telegram-verify", RateLimit(max_requests=5, window_seconds=300))
+
+    def limit_password_reset_requests(request: Request) -> None:
+        rate_limiter.check(request, "password-reset-request", RateLimit(max_requests=3, window_seconds=3600))
+
+    def limit_password_reset_confirmations(request: Request) -> None:
+        rate_limiter.check(request, "password-reset-confirm", RateLimit(max_requests=5, window_seconds=900))
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -329,6 +360,38 @@ def create_app(
         workspace_services.log_store.append("info", "workspace user logged in", email=user.email, workspace_id=user.workspace_id)
         return {"user": auth_manager.public_user(user), "signup_enabled": auth_manager.signup_enabled()}
 
+    @app.post("/auth/forgot-password", dependencies=[Depends(require_token), Depends(limit_password_reset_requests)])
+    async def forgot_password(payload: PasswordResetRequestPayload) -> dict[str, bool]:
+        # Always return the same result so this endpoint cannot be used to find
+        # out whether a particular email has an account.
+        if not password_reset_mailer.configured():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="password recovery is not configured; contact support",
+            )
+        try:
+            token = auth_manager.create_password_reset_token(payload.email)
+            if token:
+                password_reset_mailer.send_password_reset(payload.email.strip().lower(), token)
+        except PasswordResetDeliveryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="password recovery email could not be sent; try again later",
+            ) from exc
+        except (AuthError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="password recovery could not be started") from exc
+        return {"accepted": True}
+
+    @app.post("/auth/reset-password", dependencies=[Depends(require_token), Depends(limit_password_reset_confirmations)])
+    async def reset_password(payload: PasswordResetConfirmPayload) -> dict[str, bool]:
+        try:
+            auth_manager.reset_password(payload.token, payload.password)
+        except PasswordResetError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except (AuthError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        return {"reset": True}
+
     @app.get("/auth/me", dependencies=[Depends(require_token)])
     async def me(claims: SessionClaims = Depends(require_session)) -> dict[str, Any]:
         return {"user": auth_manager.public_user(claims), "signup_enabled": auth_manager.signup_enabled()}
@@ -413,7 +476,18 @@ def create_app(
     async def verify_telegram_code(payload: TelegramVerifyPayload, workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
         _, services = workspace
         try:
-            return await services.runtime.verify_telegram_code(payload.code, payload.password)
+            return await services.runtime.verify_telegram_code(payload.code)
+        except TelegramAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.post(
+        "/telegram/verify-password",
+        dependencies=[Depends(require_token), Depends(require_session), Depends(limit_telegram_verify_attempts)],
+    )
+    async def verify_telegram_password(payload: TelegramPasswordVerifyPayload, workspace: tuple[SessionClaims, WorkspaceServices] = Depends(require_workspace_context)) -> dict[str, Any]:
+        _, services = workspace
+        try:
+            return await services.runtime.verify_telegram_password(payload.password)
         except TelegramAuthError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 

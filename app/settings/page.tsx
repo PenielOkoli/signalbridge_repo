@@ -319,16 +319,38 @@ export default function SettingsPage() {
       const response = await fetchBridgeJson<StatusResponse>(connection, "/telegram/verify-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: telegramCode, password: telegramPassword || null })
+        body: JSON.stringify({ code: telegramCode })
       });
       setRuntime(response);
       setTelegramCode("");
+      setStatusText(response.telegram.auth_state === "password_required" ? "2FA password required" : "Telegram connected");
+      setErrorMessage(null);
+      if (response.telegram.auth_state === "authenticated") {
+        setTelegramPassword("");
+        void loadTelegramChats(connection);
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Telegram code failed.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function verifyTelegramPassword() {
+    setBusy("verify-password");
+    try {
+      const response = await fetchBridgeJson<StatusResponse>(connection, "/telegram/verify-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: telegramPassword })
+      });
+      setRuntime(response);
       setTelegramPassword("");
       setStatusText("Telegram connected");
       setErrorMessage(null);
       void loadTelegramChats(connection);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Telegram code failed.");
+      setErrorMessage(error instanceof Error ? error.message : "Telegram 2FA password failed.");
     } finally {
       setBusy(null);
     }
@@ -422,17 +444,17 @@ export default function SettingsPage() {
                 <div className="grid gap-3 md:grid-cols-2">
                   <Field label="Phone number" value={config.telegram.phone_number} onChange={(value) => setConfig({ ...config, telegram: { ...config.telegram, phone_number: value } })} placeholder="+15551234567" />
                   <InfoRow label="Last code" value={formatUtcTimestamp(runtime?.telegram.code_sent_at ?? null)} />
-                  <Field label="SMS code" value={telegramCode} onChange={setTelegramCode} placeholder="Code from Telegram" />
-                  <Field label="2FA password" type="password" value={telegramPassword} onChange={setTelegramPassword} placeholder="Only if Telegram asks" />
+                  {runtime?.telegram.auth_state !== "password_required" ? <Field label="SMS code" value={telegramCode} onChange={setTelegramCode} placeholder="Code from Telegram" /> : null}
+                  {runtime?.telegram.auth_state === "password_required" ? <Field label="Telegram 2FA password" type="password" value={telegramPassword} onChange={setTelegramPassword} placeholder="Enter your Telegram password" /> : null}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button type="button" onClick={requestCode} className="simple-secondary-button" disabled={busy !== null || runtime?.telegram.auth_state === "code_sent" || runtime?.telegram.auth_state === "password_required" || runtime?.telegram.auth_state === "authenticated"}>
                     <Unlock className="h-4 w-4" />
-                    {runtime?.telegram.auth_state === "code_sent" || runtime?.telegram.auth_state === "password_required" ? "Code sent" : "Request code"}
+                    {runtime?.telegram.auth_state === "password_required" ? "2FA required" : runtime?.telegram.auth_state === "code_sent" ? "Code sent" : "Request code"}
                   </button>
-                  <button type="button" onClick={verifyCode} className="simple-primary-button" disabled={busy !== null || !telegramCode || runtime?.telegram.auth_state === "authenticated"}>
+                  <button type="button" onClick={runtime?.telegram.auth_state === "password_required" ? verifyTelegramPassword : verifyCode} className="simple-primary-button" disabled={busy !== null || runtime?.telegram.auth_state === "authenticated" || (runtime?.telegram.auth_state === "password_required" ? !telegramPassword : !telegramCode)}>
                     <ShieldCheck className="h-4 w-4" />
-                    Verify code
+                    {runtime?.telegram.auth_state === "password_required" ? "Verify 2FA password" : "Verify code"}
                   </button>
                   <button type="button" onClick={logoutTelegram} className="simple-secondary-button" disabled={busy !== null}>
                     <LogOut className="h-4 w-4" />

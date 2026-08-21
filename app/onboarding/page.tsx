@@ -128,15 +128,37 @@ export default function OnboardingPage() {
       const response = await fetchBridgeJson<StatusResponse>(connection, "/telegram/verify-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: telegramCode, password: telegramPassword || null })
+        body: JSON.stringify({ code: telegramCode })
       });
       setRuntime(response);
       setTelegramCode("");
+      if (response.telegram.auth_state === "authenticated") {
+        setTelegramPassword("");
+        await loadTelegramChats();
+        setStep("channels");
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "That code didn't work.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function verifyTelegramPassword() {
+    setBusy("verify-password");
+    setErrorMessage(null);
+    try {
+      const response = await fetchBridgeJson<StatusResponse>(connection, "/telegram/verify-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: telegramPassword })
+      });
+      setRuntime(response);
       setTelegramPassword("");
       await loadTelegramChats();
       setStep("channels");
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "That code didn't work.");
+      setErrorMessage(error instanceof Error ? error.message : "That password didn't work.");
     } finally {
       setBusy(null);
     }
@@ -191,7 +213,8 @@ export default function OnboardingPage() {
   });
 
   const authState = runtime?.telegram.auth_state ?? "unknown";
-  const codeRequested = authState === "code_sent" || authState === "password_required";
+  const codeRequested = authState === "code_sent";
+  const passwordRequired = authState === "password_required";
   const stepNumber = step === "telegram" ? 1 : 2;
 
   return (
@@ -257,18 +280,25 @@ export default function OnboardingPage() {
                 />
               </label>
 
-              {codeRequested ? (
+              {passwordRequired ? (
+                <div className="mt-4 grid gap-4">
+                  <div className="rounded-lg border border-accent/30 bg-accent/10 px-4 py-3 text-sm font-bold text-ink-2">
+                    Telegram accepted your code and needs your two-factor password to finish signing in.
+                  </div>
+                  <label className="grid gap-2">
+                    <span className="text-xs font-black uppercase tracking-[0.14em] text-ink-3">Telegram 2FA password</span>
+                    <input className="auth-input" type="password" value={telegramPassword} onChange={(event) => setTelegramPassword(event.target.value)} autoComplete="current-password" />
+                  </label>
+                  <button type="button" onClick={verifyTelegramPassword} className="primary-cta w-full" disabled={busy !== null || !telegramPassword}>
+                    {busy === "verify-password" ? "Verifying..." : "Verify 2FA password"} <ArrowRight className="h-4 w-4" />
+                  </button>
+                </div>
+              ) : codeRequested ? (
                 <div className="mt-4 grid gap-4">
                   <label className="grid gap-2">
                     <span className="text-xs font-black uppercase tracking-[0.14em] text-ink-3">SMS code</span>
                     <input className="auth-input" value={telegramCode} onChange={(event) => setTelegramCode(event.target.value)} placeholder="Code from Telegram" />
                   </label>
-                  {authState === "password_required" ? (
-                    <label className="grid gap-2">
-                      <span className="text-xs font-black uppercase tracking-[0.14em] text-ink-3">2FA password</span>
-                      <input className="auth-input" type="password" value={telegramPassword} onChange={(event) => setTelegramPassword(event.target.value)} placeholder="Only if Telegram asks" />
-                    </label>
-                  ) : null}
                   <button type="button" onClick={verifyCode} className="primary-cta w-full" disabled={busy !== null || !telegramCode}>
                     {busy === "verify-code" ? "Verifying..." : "Verify code"} <ArrowRight className="h-4 w-4" />
                   </button>
