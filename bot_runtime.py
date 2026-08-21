@@ -649,6 +649,12 @@ class BotSupervisor:
             if result.risk_usdt is not None:
                 leverage_part = f" \u00b7 {result.leverage}x" if result.leverage else ""
                 lines.append(f"Risk: ${result.risk_usdt:.2f}{leverage_part}")
+            if result.risk_limited_by_available_margin:
+                requested = result.requested_risk_usdt or result.risk_usdt or 0
+                margin = result.estimated_margin_usdt or 0
+                lines.append(
+                    f"Size reduced for available margin: ${result.risk_usdt:.2f} risk of ${requested:.2f} requested · ~${margin:.2f} margin"
+                )
             await self._send_self_notification("\n".join(lines))
         elif action == SignalAction.AMEND or action == "amend":
             changes = []

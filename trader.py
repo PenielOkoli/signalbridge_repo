@@ -99,6 +99,12 @@ EXCHANGE_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Leave a small amount of free collateral untouched. The exchange can include
+# trading fees and small mark-price movements when checking an order's initial
+# margin, so an order that consumes the reported free balance exactly may still
+# be rejected.
+AVAILABLE_MARGIN_RESERVE_PERCENT = Decimal("2")
+
 
 def _compact_exception_chain(exc: BaseException) -> str:
     """Return one safe, single-line message including nested network causes."""
@@ -161,7 +167,11 @@ class PositionSizing(TraderModel):
     stop_loss: float = Field(gt=0)
     take_profit_targets: list[float] = Field(default_factory=list)
     risk_usdt: float = Field(gt=0)
+    requested_risk_usdt: float = Field(gt=0)
     estimated_notional_usdt: float = Field(gt=0)
+    estimated_margin_usdt: float = Field(gt=0)
+    available_margin_usdt: float = Field(ge=0)
+    risk_limited_by_available_margin: bool = False
 
 
 class ExecutionResult(TraderModel):
@@ -185,6 +195,10 @@ class ExecutionResult(TraderModel):
     stop_loss: float | None = None
     take_profit_targets: list[float] = Field(default_factory=list)
     risk_usdt: float | None = None
+    requested_risk_usdt: float | None = None
+    estimated_margin_usdt: float | None = None
+    available_margin_usdt: float | None = None
+    risk_limited_by_available_margin: bool = False
     raw_entry_status: str | None = None
     message: str = ""
 
@@ -477,22 +491,49 @@ class CcxtFuturesTrader:
         entry = await self._resolve_reference_entry_price(signal)
         self._validate_signal_geometry(signal, float(entry))
         leverage = self._effective_leverage(signal)
+        free_usdt = await self._fetch_available_usdt_balance()
 
         try:
             stop = Decimal(str(signal.stop_loss))
-            risk_usdt = await self._resolve_risk_budget_usdt()
+            requested_risk_usdt = await self._resolve_risk_budget_usdt(free_usdt)
             risk_per_unit = abs(entry - stop)
-            raw_amount = risk_usdt / risk_per_unit
+            raw_amount = requested_risk_usdt / risk_per_unit
         except (InvalidOperation, ZeroDivisionError) as exc:
             raise RiskCalculationError("unable to calculate position size from signal prices") from exc
 
         if raw_amount <= 0:
             raise RiskCalculationError("calculated position amount must be greater than zero")
 
-        self._validate_raw_amount_before_precision(signal.symbol, raw_amount, risk_per_unit)
-        amount = self._amount_to_exchange_precision(signal.symbol, raw_amount)
+        # The configured risk determines the desired quantity, but a user's
+        # exchange account determines what can actually be opened. Always use
+        # *free* USDT here: total equity can include collateral already locked
+        # by positions and open orders, which is the direct cause of Bybit's
+        # 110007 "not enough for new order" rejection.
+        available_margin = self._margin_available_for_new_order(free_usdt)
+        if available_margin <= 0:
+            raise RiskCalculationError(
+                "no free USDT margin is available for a new order; add collateral or release funds from open orders/positions"
+            )
+
+        max_affordable_amount = (available_margin * Decimal(str(leverage))) / entry
+        amount_before_precision = min(raw_amount, max_affordable_amount)
+        if amount_before_precision <= 0:
+            raise RiskCalculationError("available USDT margin is too low to fund a new order")
+
+        self._validate_raw_amount_before_precision(signal.symbol, amount_before_precision, risk_per_unit)
+        amount = self._amount_to_exchange_precision(signal.symbol, amount_before_precision)
         notional = Decimal(str(amount)) * entry
         self._validate_market_limits(signal.symbol, Decimal(str(amount)), notional)
+        estimated_margin = notional / Decimal(str(leverage))
+        if estimated_margin > available_margin:
+            # amount_to_precision should round down, but keep this guard for
+            # exchanges whose precision implementation rounds differently.
+            raise RiskCalculationError(
+                "available USDT margin changed or is too low after exchange quantity rounding; try again after adding collateral"
+            )
+
+        actual_risk_usdt = Decimal(str(amount)) * risk_per_unit
+        risk_limited = amount_before_precision < raw_amount
 
         return PositionSizing(
             symbol=signal.symbol,
@@ -503,8 +544,12 @@ class CcxtFuturesTrader:
             entry_price=float(entry),
             stop_loss=float(stop),
             take_profit_targets=self._selected_take_profit_targets(signal),
-            risk_usdt=float(risk_usdt),
+            risk_usdt=float(actual_risk_usdt),
+            requested_risk_usdt=float(requested_risk_usdt),
             estimated_notional_usdt=float(notional),
+            estimated_margin_usdt=float(estimated_margin),
+            available_margin_usdt=float(available_margin),
+            risk_limited_by_available_margin=risk_limited,
         )
 
     async def _execute_open_signal(self, signal: ParsedSignal) -> ExecutionResult:
@@ -625,6 +670,10 @@ class CcxtFuturesTrader:
             stop_loss=sizing.stop_loss,
             take_profit_targets=sizing.take_profit_targets,
             risk_usdt=sizing.risk_usdt,
+            requested_risk_usdt=sizing.requested_risk_usdt,
+            estimated_margin_usdt=sizing.estimated_margin_usdt,
+            available_margin_usdt=sizing.available_margin_usdt,
+            risk_limited_by_available_margin=sizing.risk_limited_by_available_margin,
             raw_entry_status=entry_order.get("status") if entry_order else None,
             message=message,
         )
@@ -906,30 +955,40 @@ class CcxtFuturesTrader:
             raise RiskCalculationError(f"exchange ticker for {signal.symbol} did not include a usable price")
         return price
 
-    async def _resolve_risk_budget_usdt(self) -> Decimal:
+    async def _resolve_risk_budget_usdt(self, available_balance: Decimal | None = None) -> Decimal:
         if self.risk_config.risk_mode == RiskMode.FIXED_USDT or self.risk_config.risk_mode == "fixed_usdt":
             return Decimal(str(self.risk_config.fixed_usdt_risk))
         if self.risk_config.risk_mode == RiskMode.BALANCE_PERCENT or self.risk_config.risk_mode == "balance_percent":
-            available_balance = await self._fetch_available_usdt_balance()
+            if available_balance is None:
+                available_balance = await self._fetch_available_usdt_balance()
             return (available_balance * Decimal(str(self.risk_config.balance_risk_percent))) / Decimal("100")
         raise TraderConfigurationError(f"unsupported risk mode: {self.risk_config.risk_mode}")
 
     async def _fetch_available_usdt_balance(self) -> Decimal:
+        """Return collateral that is genuinely free to reserve for a new order.
+
+        Do not fall back to ``total`` balance. On futures accounts it includes
+        margin locked in current positions and pending orders, and using it for
+        sizing produces orders the exchange correctly rejects as underfunded.
+        """
         try:
             balance = await self._call_exchange(lambda: self.exchange.fetch_balance(params=self._balance_params()))
         except Exception as exc:
-            raise TraderConfigurationError("unable to fetch account balance for balance_percent sizing") from exc
+            raise TraderConfigurationError("unable to fetch free USDT balance for position sizing") from exc
 
         usdt_bucket = balance.get("USDT") or {}
-        price = self._first_positive_decimal(
+        available_balance = self._first_non_negative_decimal(
             usdt_bucket.get("free") if isinstance(usdt_bucket, dict) else None,
             (balance.get("free") or {}).get("USDT") if isinstance(balance.get("free"), dict) else None,
-            usdt_bucket.get("total") if isinstance(usdt_bucket, dict) else None,
-            (balance.get("total") or {}).get("USDT") if isinstance(balance.get("total"), dict) else None,
         )
-        if price is None:
-            raise TraderConfigurationError("could not determine an available USDT balance for sizing")
-        return price
+        if available_balance is None:
+            raise TraderConfigurationError("could not determine free USDT margin for position sizing")
+        return available_balance
+
+    @staticmethod
+    def _margin_available_for_new_order(free_usdt: Decimal) -> Decimal:
+        reserve_factor = (Decimal("100") - AVAILABLE_MARGIN_RESERVE_PERCENT) / Decimal("100")
+        return (free_usdt * reserve_factor).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
 
     async def _enforce_daily_trade_limit(self) -> None:
         if not self.risk_config.daily_trade_limit:
@@ -1058,6 +1117,21 @@ class CcxtFuturesTrader:
                 return float(value)
             except (TypeError, ValueError):
                 continue
+        return None
+
+    @staticmethod
+    def _first_non_negative_decimal(*values: Any) -> Decimal | None:
+        """Return the first usable value, preserving a real zero balance."""
+
+        for value in values:
+            if value in (None, ""):
+                continue
+            try:
+                parsed = Decimal(str(value))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                return parsed
         return None
 
     def _amount_to_exchange_precision(self, symbol: str, amount: Decimal) -> float:
